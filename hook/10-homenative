@@ -1,0 +1,64 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 tiper
+# homenative: Home Native (the io.github.tiper.homenative app) as the TV's system Home.
+# Bind-mounts its binary over LG's /usr/bin/com.webos.app.home, so SAM, the Home key and power-on
+# start it, and covers Home's CRIU checkpoint with an empty read-only directory, so it is always
+# cold-started (CRIU can neither restore LG's snapshot nor save one of ours). Nothing on the
+# read-only rootfs is changed.
+# Undo: delete this file and reboot. Off without deleting: touch /var/lib/homenative/disabled, reboot.
+# Without the app installed this does nothing and LG's Home runs.
+
+NH=/media/developer/apps/usr/palm/applications/io.github.tiper.homenative/homenative
+H=/usr/bin/com.webos.app.home
+CP=/mnt/lg/cmn_data/checkpoint/com.webos.app.home
+E=/tmp/homenative-checkpoint
+
+[ -f /var/lib/homenative/disabled ] && exit 0
+[ -x "$NH" ] || exit 0
+
+grep -q " $H " /proc/mounts || mount --bind "$NH" "$H" || exit 0
+mkdir -p $E
+if ! grep " $CP " /proc/mounts | tail -1 | grep -q "^tmpfs .* ro,"; then
+  mount --bind $E $CP && mount -o remount,bind,ro $CP
+fi
+
+# Home is already running: LG's, resumed by the snapshot boot ~14 s in, before any of these
+# hooks. Swap it for ours right away. It is brought to the front only if Home was there, so live
+# TV or HDMI is never interrupted; otherwise ours is preloaded hidden (SAM would only start Home
+# itself at ~70 s). A second look a little later catches anything that brought LG's back.
+ours=$(md5sum < "$NH")
+log() { echo "$(cut -d" " -f1 /proc/uptime) $*" >> /tmp/homenative-hook.log; }
+log "mounted"
+swap_if_lg() {
+  lg=""
+  for P in $(pidof com.webos.app.home); do
+    [ "$(md5sum < /proc/$P/exe 2>/dev/null)" = "$ours" ] || lg="$lg $P"
+  done
+  [ -n "$lg" ] || return 0
+  fg=$(luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo '{}' 2>/dev/null |
+    sed -n 's/.*"appId": *"\([^"]*\)".*/\1/p')
+  log "killing LG Home$lg (foreground: $fg)"
+  kill -9 $lg
+  sleep 1
+  if [ -z "$fg" ] || [ "$fg" = "com.webos.app.home" ]; then
+    [ -z "$(pidof com.webos.app.home)" ] &&
+      luna-send -n 1 luna://com.webos.applicationManager/launch '{"id":"com.webos.app.home"}' >/dev/null 2>&1
+  fi
+  preload
+}
+# Start ours in the background, as SAM itself does later in boot, so Home is ready at once.
+preload() {
+  [ -z "$(pidof com.webos.app.home)" ] || return 0
+  log "preloading"
+  luna-send -n 1 luna://com.webos.applicationManager/launch '{"id":"com.webos.app.home","preload":"full"}' >/dev/null 2>&1
+}
+(
+  i=0
+  while [ -z "$(pidof com.webos.app.home)" ] && [ $i -lt 5 ]; do sleep 1; i=$((i + 1)); done
+  swap_if_lg
+  preload
+  sleep 20
+  swap_if_lg
+) &
+exit 0

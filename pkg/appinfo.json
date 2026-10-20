@@ -1,0 +1,16 @@
+{
+  "id": "io.github.tiper.homenative",
+  "version": "0.1.0",
+  "vendor": "tiper",
+  "type": "native",
+  "main": "homenative",
+  "title": "Home Native",
+  "icon": "icon.png",
+  "largeIcon": "icon.png",
+  "iconColor": "#1a1a1f",
+  "nativeLifeCycleInterfaceVersion": 2,
+  "handlesRelaunch": false,
+  "transparent": false,
+  "noSplashOnLaunch": true,
+  "requiredMemory": 60
+}

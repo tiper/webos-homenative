@@ -1,0 +1,20 @@
+# Whitelist: this folder also holds probe scripts, their outputs, screenshots and files pulled
+# off the TV (LG's own Home QML among them), none of which belong in the repo.
+/*
+!/.gitignore
+!/README.md
+!/TESTING.md
+!/Makefile
+!/mkipk.py
+!/src/
+!/vendor/
+!/pkg/
+!/hook/
+!/scripts/
+!/art/
+!/docs/
+!/LICENSE
+!/.github/
+/pkg/homenative
+/src/*.bak
+*.ipk

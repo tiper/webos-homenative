@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds the ipk and the release tarball on every push and pull request. A tag v<version>
+# (matching pkg/appinfo.json) publishes a GitHub release with the tarball and the ipk.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # the webOS NDK (openlgtv/buildroot-nc4): GCC 12 with SDL2, GLES2 and luna-service2 in its sysroot
+  NDK_TAG: 2026.08-webos
+  NDK_FILE: arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the NDK
+        id: ndk
+        uses: actions/cache@v4
+        with:
+          path: ~/webos-ndk
+          key: webos-ndk-${{ env.NDK_TAG }}
+
+      - name: Fetch the NDK
+        if: steps.ndk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/webos-ndk
+          curl -fsSL "https://github.com/openlgtv/buildroot-nc4/releases/download/$NDK_TAG/$NDK_FILE" \
+            | tar -xz -C ~/webos-ndk
+          ~/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot/relocate-sdk.sh
+
+      - name: Build
+        run: make dist
+
+      - name: Check the version
+        id: ver
+        run: |
+          v=$(python3 -c "import json;print(json.load(open('pkg/appinfo.json'))['version'])")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF#refs/tags/v}" != "$v" ]]; then
+            echo "::error::tag ${GITHUB_REF#refs/tags/} does not match appinfo.json version $v"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homenative-${{ steps.ver.outputs.version }}
+          path: |
+            dist/homenative-*.tar.gz
+            io.github.tiper.homenative_*_arm.ipk
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${{ steps.ver.outputs.version }}
+          gh release create "v$v" --title "Home Native $v" --generate-notes \
+            "dist/homenative-$v.tar.gz" "io.github.tiper.homenative_${v}_arm.ipk"
