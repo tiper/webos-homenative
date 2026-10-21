@@ -426,9 +426,10 @@ static void format_date(char *out, size_t n, const struct tm *tm) {
 /* ---------- model ----------
  * The page is a column of rows, as on LG's home: input pills and the app tiles over the
  * wallpaper; below them (Down from the apps scrolls the page up, LG's "dashboard") the Home
- * Dashboard / Mobile / TV & Inputs cards, the frequently watched channels and the Browser shelf. */
+ * Dashboard / Mobile / TV & Inputs cards and the frequently watched channels. LG's Browser shelf
+ * and footer buttons are left out: they repeat the top buttons and the app row. */
 
-typedef enum { K_APP, K_PILL, K_HOMEDASH, K_WHITE, K_CHANNEL, K_BROWSER, K_RECENT, K_TOP, K_FOOT } Kind;
+typedef enum { K_APP, K_PILL, K_HOMEDASH, K_WHITE, K_CHANNEL, K_RECENT, K_TOP } Kind;
 
 typedef struct {
     char id[200];    /* identity across updates (launch point, input, channel, content id) */
@@ -464,8 +465,8 @@ typedef struct {
 } Row;
 
 /* ROW_RECENTS is not part of the page: it lives in the Recents panel Back opens */
-enum { ROW_TOP, ROW_INPUTS, ROW_APPS, ROW_DASH, ROW_CHANNELS, ROW_BROWSER, ROW_FOOT, ROW_RECENTS, NROWS };
-#define LAST_PAGE_ROW ROW_FOOT
+enum { ROW_TOP, ROW_INPUTS, ROW_APPS, ROW_DASH, ROW_CHANNELS, ROW_RECENTS, NROWS };
+#define LAST_PAGE_ROW ROW_CHANNELS
 static Row rows[NROWS];
 static int cur_row = ROW_APPS;
 static int dirty = 1;
@@ -492,10 +493,8 @@ static float kind_h(Kind k) {
     case K_HOMEDASH: return 192;
     case K_WHITE: return 192;  /* MobileComponent: homeConnectHeight */
     case K_CHANNEL: return 216;
-    case K_BROWSER: return 250; /* the shelf's 300 less 50 (the card fills the list's height) */
     case K_RECENT: return 189;
     case K_TOP: return 60;
-    case K_FOOT: return 72;
     }
     return 100;
 }
@@ -512,10 +511,8 @@ static float item_w(const Row *r, const Item *it) {
     case K_WHITE: return 308; /* homeConnectWidth, the Home Dashboard card too */
     case K_HOMEDASH: return 308;
     case K_CHANNEL: return 308;
-    case K_BROWSER: return 360; /* MobileComponent's browser_guide: tile.wideWidth */
     case K_RECENT: return 336;
     case K_TOP: return 60;
-    case K_FOOT: return 270;
     }
     return 100;
 }
@@ -1031,21 +1028,6 @@ static void build_top(void) {
     row_merge(&rows[ROW_TOP], &nw);
 }
 
-/* LG's footer (FooterButtons.qml): back to the top, and edit */
-static void build_footer(void) {
-    static const struct { const char *id, *app; unsigned glyph; } b[] = {
-        {"foot:top", "@top", 0x21E7}, {"foot:edit", "@edit", 0xF0149},
-    };
-    Row nw = {0};
-    for (unsigned i = 0; i < sizeof b / sizeof *b; i++) {
-        Item *it = row_add(&nw);
-        scpy(it->id, sizeof it->id, b[i].id);
-        scpy(it->app, sizeof it->app, b[i].app);
-        it->glyph = b[i].glyph;
-    }
-    row_merge(&rows[ROW_FOOT], &nw);
-}
-
 static void on_launchpoints(cJSON *root, const char *raw);
 static void on_launchpoints_changed(cJSON *root, const char *raw) {
     (void)raw;
@@ -1428,38 +1410,6 @@ static void build_channels(void) {
     for (int i = 0; i < r->n; i++) r->items[i].icon_state = 0;
 }
 
-/* ---------- data: browser ----------
- * The Browser shelf is the browser's own content preview (applicationManager/getAllContents,
- * launchPointId com.webos.app.browser_default), the "guide" items of it. */
-
-static void on_contents(cJSON *root, const char *raw) {
-    (void)raw;
-    cJSON *e;
-    Row nw = {0};
-    const char *heading = "";
-    cJSON_ArrayForEach(e, cJSON_GetObjectItem(root, "allContents")) {
-        if (strcmp(jstr(e, "launchPointId"), "com.webos.app.browser_default")) continue;
-        cJSON *c;
-        cJSON_ArrayForEach(c, cJSON_GetObjectItem(e, "contents")) {
-            if (!strcmp(jstr(c, "type"), "title")) { heading = jstr(c, "titleText"); continue; }
-            Item *it = row_add(&nw);
-            snprintf(it->id, sizeof it->id, "br:%s", jstr(c, "contentId"));
-            cJSON *oc = cJSON_GetObjectItem(c, "onClick");
-            scpy(it->app, sizeof it->app, jstr(oc, "targetAppId"));
-            cJSON *lp = cJSON_GetObjectItem(oc, "launchParam");
-            if (cJSON_IsObject(lp) && lp->child) it->params = cJSON_PrintUnformatted(lp);
-            scpy(it->title, sizeof it->title, jstr(c, "titleText"));
-            scpy(it->sub2, sizeof it->sub2, jstr(c, "buttonText"));
-            it->glyph = 0xF002B; /* MobileComponent's broswer_dingbat */
-        }
-    }
-    static char head[80];
-    scpy(head, sizeof head, *heading ? heading : "Browser");
-    rows[ROW_BROWSER].label = head;
-    logf_("browser shelf: %d", nw.n);
-    row_merge(&rows[ROW_BROWSER], &nw);
-}
-
 /* ---------- misc data ---------- */
 
 static void on_time(cJSON *root, const char *raw) {
@@ -1501,15 +1451,11 @@ static void on_locale(cJSON *root, const char *raw) {
 static void on_launched(cJSON *root, const char *raw) { (void)root; vlogf_("reply: %.200s", raw ? raw : ""); }
 
 static double last_launch_ms = -1e9;
-static void edit_start(void);
 static void launch(Item *it) {
     /* one press can arrive as both an OK key and a click; act on the first only */
     if (now_ms() - last_launch_ms < 600) return;
     last_launch_ms = now_ms();
     it->press = 1;
-    if (!strcmp(it->app, "@top")) { cur_row = ROW_APPS; return; }
-    /* LG's pencil edits the shelves; the nearest here is editing the app list */
-    if (!strcmp(it->app, "@edit")) { edit_start(); return; }
     if (!strcmp(it->app, "@airplay")) { /* LG opens AirPlay through its service, not an app */
         call("luna://airplay.service/showAirplayPage", "{}", on_launched);
         return;
@@ -1556,8 +1502,8 @@ static void start_subscriptions(void) {
     subscribe("luna://com.webos.service.utp.channel/getLastChannelId", "{\"sourceType\":\"INPUTSOURCE_NONE\",\"subscribe\":true}", on_last_channel);
 }
 /* Coming back to the front re-reads what changes while away (clock, the channel ranking and the
- * programmes on now). The big, slow-changing lists (iepg's channel list, ~67 KB, and the app
- * content previews, ~58 KB) are parsed on this thread, so they are read at most every 30 min. */
+ * programmes on now). The big, slow-changing list (iepg's channel list, ~67 KB) is parsed on
+ * this thread, so it is read at most every 30 min. */
 static double last_full_refresh = -1e12;
 static void refresh(void) {
     call("luna://com.palm.systemservice/time/getSystemTime", "{}", on_time);
@@ -1566,7 +1512,6 @@ static void refresh(void) {
         last_full_refresh = now_ms();
         call("luna://com.webos.service.utp.channel/getChannelMode", "{}", on_channel_mode);
         call("luna://com.webos.settingsservice/getSystemSettings", "{\"key\":\"supportAirplay\",\"category\":\"other\"}", on_airplay);
-        call("luna://com.webos.applicationManager/getAllContents", "{}", on_contents);
         request_channels();
     } else request_rank();
 }
@@ -1575,7 +1520,6 @@ static void refresh(void) {
  * up and carry it with the arrows, or go Up to the trash over it and confirm */
 enum { ED_OFF, ED_BROWSE, ED_MOVE, ED_TRASH, ED_CONFIRM, ED_HIDE }; /* ED_HIDE: the eye over a tile, ours */
 static int edit_mode;
-static void edit_start(void) { cur_row = ROW_APPS; edit_mode = ED_BROWSE; }
 /* an item focus passes over: gone, or hidden while not editing */
 static int skipped(const Item *it) { return it->dying || (it->hidden && !edit_mode); }
 /* focus must not rest on a hidden app outside edit mode: the nearest shown one takes it */
@@ -1803,8 +1747,6 @@ static void layout_rows(void) {
         if (row_live(&rows[ri])) y += row_pitch(ri);
     }
     if (cur_row <= ROW_APPS) page_target = 0;
-    /* the Browser and the footer buttons share LG's last screen */
-    else if (cur_row >= ROW_BROWSER) page_target = fmaxf(DASH_PAGE, rows[ROW_BROWSER].y - 414);
     else page_target = DASH_PAGE + fmaxf(0, rows[cur_row].y + row_h(&rows[cur_row]) - DASH_PAGE - 1040);
 }
 
@@ -1827,12 +1769,6 @@ static void load_item(int ri, Item *it) {
         it->sub_tex = text_cached(F_CARD_SUB, (int)w - 48, it->sub);
         it->sub2_tex = text_cached(F_CARD_SUB, (int)w - 48, it->sub2);
         break;
-    case K_BROWSER: /* MobileComponent's browser_guide: the same fonts, and a Dingbat gear */
-        it->icon_tex = glyph_tex(it->glyph, 60);
-        it->title_tex = text_cached(F_CARD_TITLE, (int)w - 48, it->title);
-        it->sub2_tex = text_cached(F_CARD_SUB, (int)w - 48, it->sub2);
-        break;
-    case K_FOOT: it->icon_tex = glyph_tex(it->glyph, 50); break;
     case K_TOP: it->icon_tex = glyph_tex(it->glyph, 30); break; /* LG (TopGlobalAction.qml): Dingbat 30 in a 60 px button */
     case K_RECENT: /* RecentComponent: SemiBold 30 */
         it->title_tex = text_cached(FS(30), (int)w, it->title);
@@ -1885,7 +1821,7 @@ static int update(float dt) {
             /* the zoom ignores Recents: the panel covers the row, and closing it must not spring
              * the selected tile or card again */
             int zon = ri == cur_row && i == r->sel;
-            if (ri >= ROW_DASH && ri <= ROW_BROWSER && zoom_step(it, zon, dt, FOCUS_OVERSHOOT)) moving = 1;
+            if (ri >= ROW_DASH && ri <= ROW_CHANNELS && zoom_step(it, zon, dt, FOCUS_OVERSHOOT)) moving = 1;
             /* app tiles: the same spring; none while editing */
             if (ri == ROW_APPS && zoom_step(it, zon && !edit_mode, dt, FOCUS_OVERSHOOT)) moving = 1;
             if (ri == ROW_APPS) {
@@ -2079,28 +2015,18 @@ static void glass(float x, float y, float w, float h, float rad, float f) {
     draw(x, y, w, h, rad, 0, rgba(1, 1, 1, 0.07f), NULL, 1, 0);
 }
 
-/* Home Dashboard / Mobile / TV / Inputs / channels / Browser cards */
+/* Home Dashboard / Mobile / TV / Inputs / channel cards */
 static void draw_card(Row *r, Item *it, float x, float y) {
     Kind k = item_kind(r, it);
     float f = it->focus;
     float cw = item_w(r, it), ch = kind_h(k);
-    if (k == K_FOOT) { /* LG's FooterButtons: Dingbat 50 on a 270 x 72 button, as Close All's colours */
-        Col nb = hexcol("#7d848c", rgba(0.5f, 0.5f, 0.5f, 1)), fb = hexcol("#e6e6e6", rgba(0.9f, 0.9f, 0.9f, 1));
-        Col nt = fb, ft = hexcol("#4c5059", rgba(0.3f, 0.3f, 0.35f, 1));
-        if (f > 0.01f) draw(x, y + 6, cw, ch, 6, 14, rgba(0, 0, 0, 0.5f * f), NULL, 1, 1);
-        fill(x, y, cw, ch, 6, rgba(nb.r + (fb.r - nb.r) * f, nb.g + (fb.g - nb.g) * f, nb.b + (fb.b - nb.b) * f, 1));
-        if (it->icon_tex.id)
-            draw_mask(x + (cw - it->icon_tex.w) * 0.5f, y + (ch - it->icon_tex.h) * 0.5f, (float)it->icon_tex.w, (float)it->icon_tex.h,
-                      rgba(nt.r + (ft.r - nt.r) * f, nt.g + (ft.g - nt.g) * f, nt.b + (ft.b - nt.b) * f, 1), &it->icon_tex);
-        return;
-    }
     float s = (1.f + 0.15f * it->zoom - 0.03f * it->press) * (0.4f + 0.6f * it->life);
     float w = cw * s, h = ch * s;
     /* LG zooms about a point that slides from the card's left edge at the screen's left to its
      * right edge at the screen's right (RelatedList.qml's Scale origin), so edge cards grow inwards */
     float ox = fminf(cw, fmaxf(0, cw * 0.5f * (x - r->x0) / (W * 0.5f - cw * 0.5f)));
     float x0 = x + ox * it->life - ox * s, y0 = y + (ch - h) * 0.5f, cx = x0 + w * 0.5f;
-    float rad = k == K_BROWSER ? 0.f : CARD_R;
+    float rad = CARD_R;
     if (f > 0.01f) focus_glow(x0, y0, w, h, rad, f, rgba(1, 1, 1, 1));
     float pad = 24 * s; /* LG's card insets */
     if (k == K_HOMEDASH) {
@@ -2130,10 +2056,7 @@ static void draw_card(Row *r, Item *it, float x, float y) {
     Col fg = rgba(1, 1, 1, 0.95f), fg2 = rgba(0.76f, 0.76f, 0.76f, 1);
     if (it->highlight) fg = fg2 = rgba(0.93f, 0.62f, 0.1f, 1); /* the channel the TV is on, LG's orange */
     glass(x0, y0, w, h, rad, f);
-    if (k == K_BROWSER && it->icon_tex.id) { /* the gear: Dingbat 60, centred in a 60 px box */
-        float gw = it->icon_tex.w * s, gh = it->icon_tex.h * s;
-        draw_mask(x0 + pad + (60 * s - gw) * 0.5f, y0 + pad + (60 * s - gh) * 0.5f, gw, gh, fg, &it->icon_tex);
-    } else if (it->icon_tex.id) {
+    if (it->icon_tex.id) {
         float is = 54 * s; /* LG draws these 2k assets at their own 54 px */
         draw_mask(x0 + pad, y0 + pad, is * it->icon_tex.w / (float)it->icon_tex.h, is, fg, &it->icon_tex);
     }
@@ -2155,7 +2078,7 @@ static void draw_card(Row *r, Item *it, float x, float y) {
     if (lower->id) { ty -= lower->h; draw_text(lower, x0 + pad, ty, fg2, 0); ty -= 3 * s; }
     if (!it->title_tex.id) return;
     float avail = w - 2 * pad;
-    Tex full = f > 0.5f && (k == K_WHITE || k == K_BROWSER) ? text_cached(F_CARD_TITLE, 0, it->title) : it->title_tex;
+    Tex full = f > 0.5f && k == K_WHITE ? text_cached(F_CARD_TITLE, 0, it->title) : it->title_tex;
     if (full.w <= avail + 1) { draw_text(&it->title_tex, x0 + pad, ty - it->title_tex.h, fg, 0); return; }
     /* too long, and focused: it scrolls round after a second, as LG's ScrollText does */
     float gap = 80, cycle = full.w + gap, t = (float)(now_ms() - it->fstart) / 1000.f - 1.f;
@@ -2316,7 +2239,7 @@ static void render(void) {
         /* headings over the cards, placed as on LG's screen. A heading with the focused card
          * under it rises out of the zoomed card's way (Shelf.qml shiftMainCategory: 15% of 30% of
          * the card's height), following the focus so it glides rather than bounces. */
-        float hy = y - (ri == ROW_DASH ? 46 : ri == ROW_BROWSER ? 81 : 54), lift = 0.045f * row_h(r);
+        float hy = y - (ri == ROW_DASH ? 46 : 54), lift = 0.045f * row_h(r);
         int row_focus = ri == cur_row && !recents_open;
         if (r->label) {
             Tex lt = text_cached(row_focus ? F_HEAD_FOCUS : F_HEAD, 0, r->label);
@@ -2730,14 +2653,11 @@ int main(int argc, char **argv) {
     rows[ROW_APPS] = (Row){.kind = K_APP, .y = 900, .gap = 18, .x0 = 36};
     rows[ROW_DASH] = (Row){.kind = K_WHITE, .gap = 20, .x0 = 36};
     rows[ROW_CHANNELS] = (Row){.kind = K_CHANNEL, .gap = 20, .x0 = 36};
-    rows[ROW_BROWSER] = (Row){.kind = K_BROWSER, .gap = 20, .x0 = 36, .label = "Browser"};
-    rows[ROW_FOOT] = (Row){.kind = K_FOOT, .gap = 84, .x0 = (W - (2 * 270 + 84)) * 0.5f};
     rows[ROW_RECENTS] = (Row){.kind = K_RECENT, .gap = 32, .x0 = 48};
 
     decoder_start();
     hidden_load();
     build_top();
-    build_footer();
     luna_init();
     start_subscriptions();
     refresh();

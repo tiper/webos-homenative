@@ -13,7 +13,7 @@ webOS 6 Home, with a few additions of its own, and uses a fraction of the memory
 
 | | |
 |---|---|
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Channels and Browser](docs/screenshots/browser.png) |
+| ![Dashboard](docs/screenshots/dashboard.png) | ![Channels](docs/screenshots/channels.png) |
 | ![Recents](docs/screenshots/recents.png) | ![Edit mode](docs/screenshots/edit.png) |
 
 ## Why
@@ -37,7 +37,6 @@ These follow LG's own layout, measured off its screen and its QML:
 - the top buttons (guide, search, settings, notifications, account)
 - the dashboard (Home Dashboard, Mobile, TV / Inputs)
 - frequently watched channels with the programme on now
-- the Browser card and the footer buttons
 - Recents on Back
 
 Its own additions:
@@ -48,6 +47,8 @@ Its own additions:
   titles scroll.
 - **Your own wallpaper.** Put an image at `/var/lib/homenative/wallpaper.png` (or `.jpg`).
 - **Screen saver on demand.** Hold the blue button.
+- **A shorter page.** LG's Browser card and footer buttons are left out: they repeat the top
+  buttons and the app row, and the page now ends after the channels.
 
 It's built for TVs that stay in Quick Start+ standby for weeks:
 - textures are freed when unused
@@ -102,7 +103,7 @@ to go back to the built-in one.
 | Key | Does |
 |---|---|
 | Arrows, OK | move, open |
-| Down from the apps | the dashboard: inputs, channels, Browser |
+| Down from the apps | the dashboard: inputs and channels |
 | Back on the home screen | Recents (Up, then OK, closes the app under it) |
 | Long press OK on an app | edit mode: OK picks an app up to move it, Up shows hide and delete |
 | Home | back to the home screen, from anywhere |
