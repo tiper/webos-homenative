@@ -2057,6 +2057,19 @@ static int draw_pass(const Row *r, int i) {
     return it->focus > 0.01f || it->zoom > 0.f;
 }
 
+/* a frosted-glass panel: the blurred wallpaper under it (the dashboard's own background, so it
+ * reads as one sheet of glass), a light tint that brightens with focus, and a sheen at the top.
+ * Opaque, so nothing drawn under it shows through. */
+static void glass(float x, float y, float w, float h, float rad, float f) {
+    if (wallpaper_frost.id) {
+        g_uvr[0] = x / W; g_uvr[1] = y / H; g_uvr[2] = w / W; g_uvr[3] = h / H;
+        draw(x, y, w, h, rad, 0, rgba(1, 1, 1, 1), &wallpaper_frost, 1, 1);
+        g_uvr[0] = g_uvr[1] = 0; g_uvr[2] = g_uvr[3] = 1;
+    } else fill(x, y, w, h, rad, rgba(0.12f, 0.12f, 0.13f, 1));
+    fill(x, y, w, h, rad, rgba(1, 1, 1, 0.10f + 0.06f * f));
+    draw(x, y, w, h, rad, 0, rgba(1, 1, 1, 0.07f), NULL, 1, 0);
+}
+
 /* Home Dashboard / Mobile / TV / Inputs / channels / Browser cards */
 static void draw_card(Row *r, Item *it, float x, float y) {
     Kind k = item_kind(r, it);
@@ -2107,18 +2120,16 @@ static void draw_card(Row *r, Item *it, float x, float y) {
         }
         return;
     }
-    Col bg, fg, fg2;
-    if (k == K_WHITE) { bg = rgba(1, 1, 1, 1); fg = fg2 = rgba(0, 0, 0, 1); } /* MobileComponent: #000 on #fff */
-    else if (k == K_BROWSER) { bg = hexcol("#333333", rgba(0.2f, 0.2f, 0.2f, 1)); fg = fg2 = rgba(0.9f, 0.9f, 0.9f, 1); }
-    else { bg = rgba(0.13f, 0.13f, 0.13f, 1); fg = rgba(0.9f, 0.9f, 0.9f, 1); fg2 = rgba(0.6f, 0.6f, 0.6f, 1); }
+    /* dark glass, as Recents: white text, the second line LG's #c1c1c1 */
+    Col fg = rgba(1, 1, 1, 0.95f), fg2 = rgba(0.76f, 0.76f, 0.76f, 1);
     if (it->highlight) fg = fg2 = rgba(0.93f, 0.62f, 0.1f, 1); /* the channel the TV is on, LG's orange */
-    fill(x0, y0, w, h, rad, bg);
+    glass(x0, y0, w, h, rad, f);
     if (k == K_BROWSER && it->icon_tex.id) { /* the gear: Dingbat 60, centred in a 60 px box */
         float gw = it->icon_tex.w * s, gh = it->icon_tex.h * s;
         draw_mask(x0 + pad + (60 * s - gw) * 0.5f, y0 + pad + (60 * s - gh) * 0.5f, gw, gh, fg, &it->icon_tex);
     } else if (it->icon_tex.id) {
         float is = 54 * s; /* LG draws these 2k assets at their own 54 px */
-        draw_mask(x0 + pad, y0 + pad, is * it->icon_tex.w / (float)it->icon_tex.h, is, k == K_WHITE ? rgba(0.2f, 0.2f, 0.2f, 1) : fg, &it->icon_tex);
+        draw_mask(x0 + pad, y0 + pad, is * it->icon_tex.w / (float)it->icon_tex.h, is, fg, &it->icon_tex);
     }
     if (k == K_CHANNEL && !it->icon[0]) {
         /* name, progress bar, number, programme */
