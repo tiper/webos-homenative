@@ -473,6 +473,12 @@ static int dirty = 1;
 static int on_screen = 1; /* the window is shown (another app, or the TV in standby, hides it) */
 static Tex clock_tex, date_tex;
 static char clock_str[16];
+/* OLED care: after a minute with no input Home dims, and the clock moves a few pixels each
+ * minute, so nothing sits brighter in one place for hours */
+#define IDLE_DIM_MS 60000.0
+#define IDLE_DIM 0.45f
+static double last_input_ms;
+static float dim_f, clock_dx, clock_dy;
 static long tz_offset; /* seconds, from systemservice */
 static char app_dir[PATH_MAX];
 static float page, page_target; /* vertical page scroll */
@@ -1805,6 +1811,10 @@ static int update(float dt) {
     float rtr = approach(rec_trash_f, recents_open && rec_part == 1 ? 1.f : 0.f, 16.f, dt);
     float rcl = approach(rec_close_f, recents_open && rec_part == 2 ? 1.f : 0.f, 16.f, dt);
     if (rt != recents_t || rtr != rec_trash_f || rcl != rec_close_f) { recents_t = rt; rec_trash_f = rtr; rec_close_f = rcl; moving = 1; }
+    /* dims slowly, wakes quickly */
+    int idle = on_screen && now_ms() - last_input_ms > IDLE_DIM_MS;
+    float nd = approach(dim_f, idle ? 1.f : 0.f, idle ? 1.2f : 12.f, dt);
+    if (nd != dim_f) { dim_f = nd; moving = 1; }
     float np = approach(page, page_target, 10.f, dt);
     if (np != page) { page = np; moving = 1; }
     for (int ri = 0; ri < NROWS; ri++) {
@@ -1889,6 +1899,8 @@ static int update(float dt) {
         format_date(ds, sizeof ds, &tm);
         tex_free(&clock_tex); tex_free(&date_tex);
         clock_tex = text_fit(f_clock, clock_str, 0); date_tex = text_fit(f_date, ds, 0);
+        static const signed char shift[8][2] = {{0, 0}, {3, 1}, {5, 3}, {3, 5}, {0, 4}, {-2, 2}, {-3, 0}, {-1, -2}};
+        clock_dx = shift[tm.tm_min % 8][0]; clock_dy = shift[tm.tm_min % 8][1];
         /* once a minute: the programmes' progress moves on, and a programme may have ended.
          * Not while hidden (standby can last weeks): coming back to the front refreshes them. */
         if (rank_failed && on_screen) request_rank();
@@ -2186,8 +2198,8 @@ static void render(void) {
         glEnable(GL_BLEND);
     }
 
-    draw_text(&clock_tex, 64, 36 - page, rgba(1, 1, 1, 1), 1);
-    draw_text(&date_tex, 68, 36 + (float)clock_tex.h - 6 - page, rgba(1, 1, 1, 0.8f), 1);
+    draw_text(&clock_tex, 64 + clock_dx, 36 + clock_dy - page, rgba(1, 1, 1, 1), 1);
+    draw_text(&date_tex, 68 + clock_dx, 36 + clock_dy + (float)clock_tex.h - 6 - page, rgba(1, 1, 1, 0.8f), 1);
 
     /* LG's top-right buttons: a glyph, on a light rounded square when focused */
     Row *tr = &rows[ROW_TOP];
@@ -2288,6 +2300,7 @@ static void render(void) {
         }
         g_alpha = 1;
     }
+    if (dim_f > 0.001f) fill(0, 0, W, H, 0, rgba(0, 0, 0, IDLE_DIM * dim_f));
     flush();
 }
 
@@ -2570,6 +2583,7 @@ static void dev_commands(void) {
     FILE *f = fopen("/tmp/nh-cmd", "r");
     if (!f) return;
     char w[32];
+    last_input_ms = now_ms(); dim_f = 0;
     while (fscanf(f, "%31s", w) == 1) {
         if (!strcmp(w, "left")) move(-1, 0);
         else if (!strcmp(w, "right")) move(1, 0);
@@ -2578,6 +2592,7 @@ static void dev_commands(void) {
         else if (!strcmp(w, "ok")) { ok_press(0, 0, 0); ok_release(0, 0, 0); }
         else if (!strcmp(w, "back")) { if (!edit_key(0, 0, 0, 1)) cur_row = ROW_APPS; }
         else if (!strcmp(w, "saver")) screensaver();
+        else if (!strcmp(w, "idle")) last_input_ms = now_ms() - IDLE_DIM_MS; /* dim now */
         /* edit states set directly, so a scripted check never sends OK (which could launch) */
         else if (!strcmp(w, "edit")) { cur_row = ROW_APPS; edit_mode = ED_BROWSE; }
         else if (!strcmp(w, "trash")) { cur_row = ROW_APPS; edit_mode = ED_TRASH; }
@@ -2700,7 +2715,7 @@ int main(int argc, char **argv) {
             edit_exit(); recents_show(0); ok_down = 0;
             cur_row = ROW_APPS;
             SDL_RaiseWindow(win);
-            on_screen = 1; dirty = 1;
+            on_screen = 1; dirty = 1; last_input_ms = now_ms(); dim_f = 0;
         }
         double pu0 = now_ms();
         int moving = update(dt) || ok_down;
@@ -2715,6 +2730,9 @@ int main(int argc, char **argv) {
             case SDL_QUIT: running = 0; break;
             case SDL_KEYDOWN: {
                 SDL_Keycode k = ev.key.keysym.sym;
+                last_input_ms = now_ms();
+                /* dimmed: the first key only wakes Home */
+                if (dim_f > 0.3f) { dirty = 1; break; }
                 if (k == SDLK_LEFT) move(-1, 0);
                 else if (k == SDLK_RIGHT) move(1, 0);
                 else if (k == SDLK_UP) move(0, -1);
@@ -2727,19 +2745,25 @@ int main(int argc, char **argv) {
                 dirty = 1; break;
             }
             case SDL_KEYUP:
+                last_input_ms = now_ms();
                 if (ev.key.keysym.sym == SDLK_RETURN || ev.key.keysym.sym == SDLK_KP_ENTER) ok_release(0, 0, 0);
                 else if (ev.key.keysym.scancode == SCAN_BLUE) blue_release();
                 dirty = 1; break;
-            case SDL_MOUSEMOTION: pointer_motion(ev.motion.x * sx, ev.motion.y * sy, ev.motion.xrel * sx, ev.motion.yrel * sy); dirty = 1; break;
-            case SDL_MOUSEBUTTONDOWN: if (ev.button.button == SDL_BUTTON_LEFT) ok_press(1, ev.button.x * sx, ev.button.y * sy); dirty = 1; break;
-            case SDL_MOUSEBUTTONUP: if (ev.button.button == SDL_BUTTON_LEFT) ok_release(1, ev.button.x * sx, ev.button.y * sy); dirty = 1; break;
-            case SDL_MOUSEWHEEL: move(0, ev.wheel.y > 0 ? -1 : 1); dirty = 1; break;
+            case SDL_MOUSEMOTION: case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: case SDL_MOUSEWHEEL:
+                last_input_ms = now_ms();
+                dirty = 1;
+                if (dim_f > 0.3f && ev.type != SDL_MOUSEMOTION) break; /* dimmed: a click only wakes Home */
+                if (ev.type == SDL_MOUSEMOTION) pointer_motion(ev.motion.x * sx, ev.motion.y * sy, ev.motion.xrel * sx, ev.motion.yrel * sy);
+                else if (ev.type == SDL_MOUSEBUTTONDOWN) { if (ev.button.button == SDL_BUTTON_LEFT) ok_press(1, ev.button.x * sx, ev.button.y * sy); }
+                else if (ev.type == SDL_MOUSEBUTTONUP) { if (ev.button.button == SDL_BUTTON_LEFT) ok_release(1, ev.button.x * sx, ev.button.y * sy); }
+                else move(0, ev.wheel.y > 0 ? -1 : 1);
+                break;
             case SDL_WINDOWEVENT:
                 if (ev.window.event == SDL_WINDOWEVENT_HIDDEN || ev.window.event == SDL_WINDOWEVENT_MINIMIZED) {
                     /* leaving: edit mode and Recents end, as on LG's home */
                     on_screen = 0; logf_("hidden"); edit_exit(); recents_show(0); ok_down = 0;
                 }
-                if (ev.window.event == SDL_WINDOWEVENT_SHOWN || ev.window.event == SDL_WINDOWEVENT_RESTORED || ev.window.event == SDL_WINDOWEVENT_EXPOSED) { on_screen = 1; dirty = 1; }
+                if (ev.window.event == SDL_WINDOWEVENT_SHOWN || ev.window.event == SDL_WINDOWEVENT_RESTORED || ev.window.event == SDL_WINDOWEVENT_EXPOSED) { on_screen = 1; dirty = 1; last_input_ms = now_ms(); dim_f = 0; }
                 if (ev.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
                     logf_("focus gained"); edit_exit(); recents_show(0); ok_down = 0; refresh(); dirty = 1;
                 }

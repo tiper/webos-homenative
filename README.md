@@ -47,6 +47,8 @@ Its own additions:
   titles scroll.
 - **Your own wallpaper.** Put an image at `/var/lib/homenative/wallpaper.png` (or `.jpg`).
 - **Screen saver on demand.** Hold the blue button.
+- **OLED care.** After a minute with no input Home dims (the first key only wakes it), and the
+  clock moves a few pixels each minute.
 - **A shorter page.** LG's Browser card and footer buttons are left out: they repeat the top
   buttons and the app row, and the page now ends after the channels.
 
