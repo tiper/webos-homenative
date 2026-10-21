@@ -373,19 +373,19 @@ static char ui_lang[8] = "en";
 
 enum { S_MOBILE, S_TVIN, S_GUIDE, S_CHANNELS, S_CHLIST, S_CHLIST_SUB, S_NOINFO, S_EDIT_HINT,
        S_CABLE, S_ANTENNA, S_SATELLITE, S_LIVETV, S_BROWSE_HINT, S_DELETE_Q, S_DELETE, S_CANCEL,
-       S_RECENTS, S_CLOSE_ALL, NSTR };
+       S_RECENTS, S_CLOSE_ALL, S_FIRST_HINT, NSTR };
 static const char *const str_en[NSTR] = {
     "Mobile", "TV / Inputs", "Connection Guide", "Frequently Watched Channels", "View channel list",
     "You can browse all channels", "No information", "Use the arrows to move    OK to put down",
     "Cable", "Antenna", "Satellite", "Live TV",
     "OK to move    Up to hide or delete    Back when done", "Delete \xe2\x80\x9c%s\xe2\x80\x9d?", "Delete", "Cancel",
-    "Recents", "Close All"};
+    "Recents", "Close All", "Hold OK on an app to edit    Hold blue for the screen saver"};
 static const char *const str_pt[NSTR] = {
     "Telem\xc3\xb3vel", "TV / Entradas", "Guia de Liga\xc3\xa7\xc3\xa3o", "Canais Vistos Frequentemente",
     "Ver lista de canais", "Pode explorar todos os canais", "Sem informa\xc3\xa7\xc3\xa3o",
     "Use as setas para mover    OK para pousar", "Cabo", "Antena", "Sat\xc3\xa9lite", "Live TV",
     "OK para mover    Cima para ocultar ou eliminar    Voltar para terminar", "Eliminar \xe2\x80\x9c%s\xe2\x80\x9d?", "Eliminar", "Cancelar",
-    "Listas Recentes", "Fechar Tudo"};
+    "Listas Recentes", "Fechar Tudo", "Mantenha OK numa app para editar    Mantenha o azul para a prote\xc3\xa7\xc3\xa3o de ecr\xc3\xa3"};
 static const char *S(int k) { return !strcmp(ui_lang, "pt") ? str_pt[k] : str_en[k]; }
 
 typedef struct { const char *lang, *wd[7], *mo[12], *fmt; } DateLocale;
@@ -479,6 +479,26 @@ static char clock_str[16];
 #define IDLE_DIM 0.45f
 static double last_input_ms;
 static float dim_f, clock_dx, clock_dy;
+/* the first time Home is used, a hint for the two hidden gestures, until a key or 12 s; then the
+ * flag file keeps it from coming back. It starts on the first key, the one sure sign that someone
+ * is looking: as Home the window is preloaded, and even gets focus, behind Live TV at boot. */
+#define HINTED_PATH "/var/lib/homenative/hinted"
+enum { HINT_PENDING, HINT_SHOWING, HINT_DONE };
+static int hint_state;
+static double hint_since;
+static float hint_f;
+static void hint_done(void) {
+    if (hint_state == HINT_DONE) return;
+    hint_state = HINT_DONE;
+    mkdir("/var/lib/homenative", 0755);
+    FILE *f = fopen(HINTED_PATH, "w");
+    if (f) fclose(f);
+    logf_("first hint: done%s", f ? "" : " (cannot write the flag)");
+}
+static void hint_input(void) {
+    if (hint_state == HINT_PENDING) { hint_state = HINT_SHOWING; hint_since = now_ms(); logf_("first hint"); }
+    else if (hint_state == HINT_SHOWING && now_ms() - hint_since > 1500) hint_done();
+}
 static long tz_offset; /* seconds, from systemservice */
 static char app_dir[PATH_MAX];
 static float page, page_target; /* vertical page scroll */
@@ -1811,6 +1831,9 @@ static int update(float dt) {
     float rtr = approach(rec_trash_f, recents_open && rec_part == 1 ? 1.f : 0.f, 16.f, dt);
     float rcl = approach(rec_close_f, recents_open && rec_part == 2 ? 1.f : 0.f, 16.f, dt);
     if (rt != recents_t || rtr != rec_trash_f || rcl != rec_close_f) { recents_t = rt; rec_trash_f = rtr; rec_close_f = rcl; moving = 1; }
+    if (hint_state == HINT_SHOWING && now_ms() - hint_since > 12000) hint_done();
+    float nhf = approach(hint_f, hint_state == HINT_SHOWING && !edit_mode && !recents_open && cur_row <= ROW_APPS ? 1.f : 0.f, 6.f, dt);
+    if (nhf != hint_f) { hint_f = nhf; moving = 1; }
     /* dims slowly, wakes quickly */
     int idle = on_screen && now_ms() - last_input_ms > IDLE_DIM_MS;
     float nd = approach(dim_f, idle ? 1.f : 0.f, idle ? 1.2f : 12.f, dt);
@@ -2230,6 +2253,14 @@ static void render(void) {
         Tex hint = text_cached(F_PILL, 0, S(edit_mode == ED_MOVE ? S_EDIT_HINT : S_BROWSE_HINT));
         draw_text(&hint, (W - hint.w) * 0.5f, rows[ROW_APPS].y - page - 150, rgba(1, 1, 1, 1), 1);
     }
+    if (hint_f > 0.01f) { /* the first-launch hint, on glass over the input pills */
+        Tex ht = text_cached(F_PILL, 0, S(S_FIRST_HINT));
+        float hw = ht.w + 64.f, hh = 64.f, hx = (W - hw) * 0.5f, hy = rows[ROW_INPUTS].y - 110 - page + 12 * (1 - hint_f);
+        g_alpha = hint_f * (1 - dash);
+        glass(hx, hy, hw, hh, hh * 0.5f, 0);
+        draw_text(&ht, hx + 32, hy + (hh - ht.h) * 0.5f, rgba(1, 1, 1, 1), 0);
+        g_alpha = 1;
+    }
     /* apps: unfocused first, focused last so its shadow and scale sit on top */
     r = &rows[ROW_APPS];
     for (int pass = 0; pass < 3; pass++)
@@ -2584,6 +2615,7 @@ static void dev_commands(void) {
     if (!f) return;
     char w[32];
     last_input_ms = now_ms(); dim_f = 0;
+    hint_input();
     while (fscanf(f, "%31s", w) == 1) {
         if (!strcmp(w, "left")) move(-1, 0);
         else if (!strcmp(w, "right")) move(1, 0);
@@ -2672,6 +2704,7 @@ int main(int argc, char **argv) {
 
     decoder_start();
     hidden_load();
+    if (access(HINTED_PATH, F_OK) == 0) hint_state = HINT_DONE;
     build_top();
     luna_init();
     start_subscriptions();
@@ -2731,6 +2764,7 @@ int main(int argc, char **argv) {
             case SDL_KEYDOWN: {
                 SDL_Keycode k = ev.key.keysym.sym;
                 last_input_ms = now_ms();
+                hint_input();
                 /* dimmed: the first key only wakes Home */
                 if (dim_f > 0.3f) { dirty = 1; break; }
                 if (k == SDLK_LEFT) move(-1, 0);
