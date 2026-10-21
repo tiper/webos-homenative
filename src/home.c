@@ -1722,8 +1722,10 @@ static void recents_key(int dx, int dy, int ok, int back) {
 
 /* ---------- layout & animation ---------- */
 
-/* LG's card focus (RelatedList.qml): to 1.15 in 400 ms on Easing.OutBack, overshoot 4, and
- * back in 100 ms. zoom is that curve's 0..1 (past 1 while it overshoots). */
+/* the focus zoom: LG's timing (RelatedList.qml: 400 ms on Easing.OutBack, back in 100 ms) with a
+ * gentler overshoot than LG's 4, the same for cards and app tiles. zoom is that curve's 0..1
+ * (past 1 while it overshoots). */
+#define FOCUS_OVERSHOOT 1.5f
 static float out_back(float t, float o) { t -= 1; return 1 + (o + 1) * t * t * t + o * t * t; }
 static double marquee_until; /* a title is scrolling: keep drawing frames */
 static int zoom_step(Item *it, int on, float dt, float overshoot) {
@@ -1883,9 +1885,9 @@ static int update(float dt) {
             /* the zoom ignores Recents: the panel covers the row, and closing it must not spring
              * the selected tile or card again */
             int zon = ri == cur_row && i == r->sel;
-            if (ri >= ROW_DASH && ri <= ROW_BROWSER && zoom_step(it, zon, dt, 4.f)) moving = 1;
-            /* app tiles: the same spring, gentler (the classic 1.7 overshoot); none while editing */
-            if (ri == ROW_APPS && zoom_step(it, zon && !edit_mode, dt, 1.7f)) moving = 1;
+            if (ri >= ROW_DASH && ri <= ROW_BROWSER && zoom_step(it, zon, dt, FOCUS_OVERSHOOT)) moving = 1;
+            /* app tiles: the same spring; none while editing */
+            if (ri == ROW_APPS && zoom_step(it, zon && !edit_mode, dt, FOCUS_OVERSHOOT)) moving = 1;
             if (ri == ROW_APPS) {
                 float nh2 = approach(it->hf, it->hidden && !edit_mode ? 1.f : 0.f, 9.f, dt);
                 if (nh2 != it->hf) { it->hf = nh2; moving = 1; }
@@ -1960,6 +1962,14 @@ static int update(float dt) {
     return moving;
 }
 
+/* the one focus look for app tiles, cards and Recents: a drop shadow, a soft glow (in the app's
+ * colour for tiles, white for the rest) and a thin light edge */
+static void focus_glow(float x, float y, float w, float h, float rad, float f, Col g) {
+    draw(x, y + 10 * f, w, h, rad, 22.f, rgba(0, 0, 0, 0.6f * f), NULL, 1, 1);
+    draw(x, y, w, h, rad, 34.f, rgba(g.r, g.g, g.b, 0.5f * f), NULL, 1, 1);
+    fill(x - 2, y - 2, w + 4, h + 4, rad + 2, rgba(1, 1, 1, 0.85f * f));
+}
+
 static Col on_tile(Col bg, float a) { return luma(bg) > 0.6f ? rgba(0.1f, 0.1f, 0.1f, a) : rgba(1, 1, 1, a); }
 
 static void draw_app_tile(Item *it, float x, float y) {
@@ -1974,13 +1984,12 @@ static void draw_app_tile(Item *it, float x, float y) {
     float rad = TILE_R * s;
     Col bg = it->color; bg.a = 1;
     if (f > 0.01f) {
-        draw(x0, y0 + 10 * f + 10 * lift, w, w, rad, 22.f + 10 * lift, rgba(0, 0, 0, 0.6f * f), NULL, 1, 1); /* shadow */
-        if (edit_mode) /* editing keeps LG's white ring: it says which tile the buttons act on */
+        if (edit_mode) { /* editing keeps LG's white ring: it says which tile the buttons act on */
+            draw(x0, y0 + 10 * f + 10 * lift, w, w, rad, 22.f + 10 * lift, rgba(0, 0, 0, 0.6f * f), NULL, 1, 1);
             fill(x0 - 4, y0 - 4, w + 8, w + 8, rad + 4, rgba(1, 1, 1, f * (1 - 0.6f * fmaxf(trash_f, hide_f))));
-        else { /* a glow in the app's own colour (white for dark tiles), and a thin light edge */
+        } else { /* the glow in the app's own colour (white for dark tiles) */
             Col g = luma(bg) < 0.18f ? rgba(1, 1, 1, 1) : rgba(fminf(1, bg.r * 1.25f + 0.1f), fminf(1, bg.g * 1.25f + 0.1f), fminf(1, bg.b * 1.25f + 0.1f), 1);
-            draw(x0, y0, w, w, rad, 34.f, rgba(g.r, g.g, g.b, 0.5f * f), NULL, 1, 1);
-            fill(x0 - 2, y0 - 2, w + 4, w + 4, rad + 2, rgba(1, 1, 1, 0.85f * f));
+            focus_glow(x0, y0, w, w, rad, f, g);
         }
     }
     fill(x0, y0, w, w, rad, bg);
@@ -2092,10 +2101,7 @@ static void draw_card(Row *r, Item *it, float x, float y) {
     float ox = fminf(cw, fmaxf(0, cw * 0.5f * (x - r->x0) / (W * 0.5f - cw * 0.5f)));
     float x0 = x + ox * it->life - ox * s, y0 = y + (ch - h) * 0.5f, cx = x0 + w * 0.5f;
     float rad = k == K_BROWSER ? 0.f : CARD_R;
-    if (f > 0.01f) { /* a drop shadow and a 2 px #e6e6e6 border */
-        draw(x0, y0 + 12 * f, w, h, rad, 24.f, rgba(0, 0, 0, 0.6f * f), NULL, 1, 1);
-        fill(x0 - 2, y0 - 2, w + 4, h + 4, rad + 2, rgba(0.9f, 0.9f, 0.9f, f));
-    }
+    if (f > 0.01f) focus_glow(x0, y0, w, h, rad, f, rgba(1, 1, 1, 1));
     float pad = 24 * s; /* LG's card insets */
     if (k == K_HOMEDASH) {
         fill(x0, y0, w, h, rad, rgba(0.30f, 0.40f, 0.34f, 1));
@@ -2201,7 +2207,7 @@ static void draw_recents(void) {
             g_alpha = v * t;
             float f = it->focus, s = (1.f + 0.15f * f - 0.04f * it->press) * (0.6f + 0.4f * v);
             float w = 336 * s, h = 189 * s, cx = x + 168 * slot_of(it), x0 = cx - w * 0.5f, y0 = y + (189 - h) * 0.5f;
-            if (f > 0.01f) draw(x0, y0 + 12 * f, w, h, 2, 26.f, rgba(0, 0, 0, 0.6f * f), NULL, 1, 1);
+            if (f > 0.01f) focus_glow(x0, y0, w, h, 2, f, rgba(1, 1, 1, 1));
             Col bg = it->color; bg.a = 1;
             fill(x0, y0, w, h, 2, bg);
             if (it->image_tex.id) {
