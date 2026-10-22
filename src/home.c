@@ -462,6 +462,7 @@ typedef struct {
     Kind kind;
     float scroll, y, gap, x0;
     const char *label; /* heading above the row (cards rows), NULL for none */
+    int back_sel, back_ok; /* where focus left this row going up or down, until a move sideways */
 } Row;
 
 /* ROW_RECENTS is not part of the page: it lives in the Recents panel Back opens */
@@ -2471,24 +2472,34 @@ static void move(int dx, int dy) {
         int nr = cur_row + dy;
         while (nr >= 0 && nr <= LAST_PAGE_ROW && !row_live(&rows[nr])) nr += dy;
         if (nr >= 0 && nr <= LAST_PAGE_ROW) {
-            /* keep the column under the focus when changing rows */
-            Row *c = &rows[cur_row];
-            float fx = c->n ? c->items[c->sel].ax - c->scroll + item_w(c, &c->items[c->sel]) * 0.5f : 0;
-            Row *t = &rows[nr];
-            int best = t->sel; float bd = 1e9f;
-            for (int i = 0; i < t->n; i++) {
-                if (skipped(&t->items[i])) continue;
-                float cxx = t->items[i].ax - t->scroll + item_w(t, &t->items[i]) * 0.5f;
-                if (fabsf(cxx - fx) < bd) { bd = fabsf(cxx - fx); best = i; }
+            Row *c = &rows[cur_row], *t = &rows[nr];
+            c->back_sel = c->sel; c->back_ok = 1;
+            if (t->back_ok && t->back_sel < t->n && !skipped(&t->items[t->back_sel])) {
+                /* straight back up or down: to the item focus left this row from, so a trip
+                 * through rows of wider or narrower items (cards, pills) does not shift it */
+                t->sel = t->back_sel;
+            } else {
+                /* otherwise keep the column under the focus */
+                float fx = c->n ? c->items[c->sel].ax - c->scroll + item_w(c, &c->items[c->sel]) * 0.5f : 0;
+                int best = t->sel; float bd = 1e9f;
+                for (int i = 0; i < t->n; i++) {
+                    if (skipped(&t->items[i])) continue;
+                    float cxx = t->items[i].ax - t->scroll + item_w(t, &t->items[i]) * 0.5f;
+                    if (fabsf(cxx - fx) < bd) { bd = fabsf(cxx - fx); best = i; }
+                }
+                t->sel = best;
             }
-            t->sel = best; cur_row = nr;
+            cur_row = nr;
         }
     }
     Row *r = &rows[cur_row];
     if (dx && r->n) {
         int ns = r->sel + dx;
         while (ns >= 0 && ns < r->n && skipped(&r->items[ns])) ns += dx;
-        if (ns >= 0 && ns < r->n) r->sel = ns;
+        if (ns >= 0 && ns < r->n) {
+            r->sel = ns; /* a new column: the other rows pick by position again */
+            for (int ri = 0; ri <= LAST_PAGE_ROW; ri++) rows[ri].back_ok = 0;
+        }
     }
 }
 
@@ -2515,7 +2526,10 @@ static void pointer_motion(float x, float y, float dx, float dy) {
     }
     if (edit_mode || recents_open) return;
     int ri, i;
-    if (pointer_hit(x, y, &ri, &i)) { cur_row = ri; rows[ri].sel = i; }
+    if (pointer_hit(x, y, &ri, &i) && (ri != cur_row || i != rows[ri].sel)) {
+        cur_row = ri; rows[ri].sel = i;
+        for (int k = 0; k <= LAST_PAGE_ROW; k++) rows[k].back_ok = 0;
+    }
 }
 
 /* OK (key or click): a short press launches on release, a long press on an app starts moving it */
@@ -2621,6 +2635,7 @@ static void dev_commands(void) {
         else if (!strcmp(w, "right")) move(1, 0);
         else if (!strcmp(w, "up")) move(0, -1);
         else if (!strcmp(w, "down")) move(0, 1);
+        else if (!strcmp(w, "where")) { Row *r = &rows[cur_row]; logf_("where: row %d item %d %s", cur_row, r->sel, r->n ? r->items[r->sel].id : "-"); }
         else if (!strcmp(w, "ok")) { ok_press(0, 0, 0); ok_release(0, 0, 0); }
         else if (!strcmp(w, "back")) { if (!edit_key(0, 0, 0, 1)) cur_row = ROW_APPS; }
         else if (!strcmp(w, "saver")) screensaver();
