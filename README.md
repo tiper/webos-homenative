@@ -180,7 +180,8 @@ These are read when Home starts:
 - `/var/lib/homenative/verbose` logs every system call and image load to
   `/tmp/homenative.log`. The log restarts past 512 KB either way.
 - `/var/lib/homenative/dev` takes key names from `/tmp/nh-cmd`, for scripted checks. It's
-  always on in the separate dev app, which lets you try a build without rebooting.
+  always on in the separate dev app, which lets you try a build without rebooting. The dev
+  app logs to `/tmp/homenative-dev.log`, since it runs as an app user and cannot write Home's log.
 
 ## Licence
 

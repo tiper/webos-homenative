@@ -50,10 +50,13 @@ static double now_ms(void) { return (double)(SDL_GetPerformanceCounter() - t0) *
  * starts over past LOG_MAX, and as Home the per-call chatter (vlogf_) stays out unless
  * /var/lib/homenative/verbose exists. */
 #define LOG_PATH "/tmp/homenative.log"
+/* the dev app runs as an app user, who cannot write Home's (root's) log: it keeps its own */
+#define DEV_LOG_PATH "/tmp/homenative-dev.log"
 #define LOG_MAX (512 * 1024)
+static const char *log_path = LOG_PATH;
 static int verbose = 1;
 static void logf_(const char *fmt, ...) {
-    if (ftell(stderr) > LOG_MAX && freopen(LOG_PATH, "w", stderr)) fprintf(stderr, "(log restarted)\n");
+    if (ftell(stderr) > LOG_MAX && freopen(log_path, "w", stderr)) fprintf(stderr, "(log restarted)\n");
     va_list ap; va_start(ap, fmt);
     fprintf(stderr, "[%8.1f] ", t0 ? now_ms() : 0.0);
     vfprintf(stderr, fmt, ap);
@@ -2660,7 +2663,8 @@ static void dev_commands(void) {
 /* ---------- main ---------- */
 
 int main(int argc, char **argv) {
-    if (!freopen(LOG_PATH, "w", stderr)) {} /* no log is no reason not to run */
+    if (!freopen(log_path, "w", stderr) && freopen(DEV_LOG_PATH, "w", stderr)) log_path = DEV_LOG_PATH;
+    /* (no log at all is no reason not to run) */
     t0 = SDL_GetPerformanceCounter();
     logf_("start argv1=%.300s", argc > 1 ? argv[1] : "");
 
