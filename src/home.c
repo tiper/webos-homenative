@@ -1607,6 +1607,9 @@ static double recents_refetch_at; /* a pending re-read of the list, coalesced (0
 static void recents_show(int on);
 static int rec_part;          /* focus inside the panel: 0 the cards, 1 the trash, 2 Close All */
 static float recents_t, rec_trash_f, rec_close_f;
+/* where draw_recents last put things, for the pointer: the panel top, Close All, the trash */
+static float rec_py = H, rec_close_r[4], rec_trash_r[4];
+static int rec_trash_on;
 
 static void on_recents(cJSON *root, const char *raw) {
     (void)raw;
@@ -2150,6 +2153,8 @@ static void draw_recents(void) {
     /* measured off LG's screen: the label sits in 34 px of padding a side (its margin items
      * plus the label area's own inset) */
     float bw = fmaxf(150.f, ct.w + 68.f), bh = 60, bx = W - 48 - bw, by = py + 40;
+    rec_py = py; rec_close_r[0] = bx; rec_close_r[1] = by; rec_close_r[2] = bw; rec_close_r[3] = bh;
+    rec_trash_on = 0;
     if (rec_close_f > 0.01f) draw(bx, by + 6, bw, bh, 6, 14, rgba(0, 0, 0, 0.5f * rec_close_f), NULL, 1, 1);
     Col nb = hexcol("#7d848c", rgba(0.5f, 0.5f, 0.5f, 1)), fb = hexcol("#e6e6e6", rgba(0.9f, 0.9f, 0.9f, 1));
     Col nt = fb, ft = hexcol("#4c5059", rgba(0.3f, 0.3f, 0.35f, 1));
@@ -2188,6 +2193,7 @@ static void draw_recents(void) {
             }
             if (f > 0.5f) { /* the trash over the focused card closes that app */
                 float d = 56, tx = cx - d * 0.5f, ty = y0 - 18 - d;
+                rec_trash_on = 1; rec_trash_r[0] = tx; rec_trash_r[1] = ty; rec_trash_r[2] = d; rec_trash_r[3] = d;
                 if (rec_trash_f > 0.01f) fill(tx, ty, d, d, d * 0.5f, rgba(1, 1, 1, rec_trash_f));
                 Tex ic = icon_load(rec_trash_f > 0.5f ? HOME_IMG "ic_delete_f.png" : HOME_IMG "ic_delete_n.png");
                 if (ic.id) draw(cx - ic.w * 0.5f, ty + (d - ic.h) * 0.5f, (float)ic.w, (float)ic.h, 0, 0, rgba(1, 1, 1, 1), &ic, 1, 1);
@@ -2520,6 +2526,31 @@ static Item *pointer_hit(float x, float y, int *ri_out, int *i_out) {
     return NULL;
 }
 
+/* the pointer over the Recents panel: 0 a card (*i), 1 the focused card's trash, 2 Close All,
+ * -1 the panel but nothing on it, -2 above the panel */
+static int recents_hit(float x, float y, int *i) {
+    #define IN(r) (x >= (r)[0] && x <= (r)[0] + (r)[2] && y >= (r)[1] && y <= (r)[1] + (r)[3])
+    if (y < rec_py) return -2;
+    if (IN(rec_close_r)) return 2;
+    if (rec_trash_on && IN(rec_trash_r)) return 1;
+    #undef IN
+    Row *r = &rows[ROW_RECENTS];
+    float cy = rec_py + 180;
+    for (int k = 0; k < r->n; k++) {
+        if (r->items[k].dying) continue;
+        float cx = r->items[k].ax - r->scroll + 168 * slot_of(&r->items[k]);
+        if (x >= cx - 168 && x <= cx + 168 && y >= cy - 14 && y <= cy + 189 + 60) { *i = k; return 0; }
+    }
+    return -1;
+}
+
+/* hovering in Recents moves the focus there, as on the page */
+static void recents_pointer(float x, float y) {
+    int i = 0, part = recents_hit(x, y, &i);
+    if (part == 0) { rows[ROW_RECENTS].sel = i; rec_part = 0; }
+    else if (part == 1 || part == 2) rec_part = part;
+}
+
 static void pointer_motion(float x, float y, float dx, float dy) {
     if (dpad_mode) {
         motion_since_dpad += fabsf(dx) + fabsf(dy);
@@ -2527,7 +2558,8 @@ static void pointer_motion(float x, float y, float dx, float dy) {
         dpad_mode = 0;
         if (cursor_visibility) cursor_visibility(SDL_TRUE);
     }
-    if (edit_mode || recents_open) return;
+    if (recents_open) { if (!closing_all) recents_pointer(x, y); return; }
+    if (edit_mode) return;
     int ri, i;
     if (pointer_hit(x, y, &ri, &i) && (ri != cur_row || i != rows[ri].sel)) {
         cur_row = ri; rows[ri].sel = i;
@@ -2599,7 +2631,14 @@ static void ok_release(int is_click, float x, float y) {
     if (!ok_down) return;
     ok_down = 0;
     if (ok_long) return;
-    if (recents_open) { if (!is_click) recents_key(0, 0, 1, 0); return; }
+    if (recents_open) {
+        if (!is_click) { recents_key(0, 0, 1, 0); return; }
+        /* a click: what is under the pointer, or a click above the panel closes it */
+        int i = 0, part = recents_hit(x, y, &i);
+        if (part == -2) recents_key(0, 0, 0, 1);
+        else if (part >= 0) { if (part == 0) rows[ROW_RECENTS].sel = i; rec_part = part; recents_key(0, 0, 1, 0); }
+        return;
+    }
     if (edit_mode) { edit_key(0, 0, 1, 0); return; }
     if (is_click) {
         int ri, i;
@@ -2631,6 +2670,7 @@ static void dev_commands(void) {
     FILE *f = fopen("/tmp/nh-cmd", "r");
     if (!f) return;
     char w[32];
+    float px, py;
     last_input_ms = now_ms(); dim_f = 0;
     hint_input();
     while (fscanf(f, "%31s", w) == 1) {
@@ -2638,7 +2678,13 @@ static void dev_commands(void) {
         else if (!strcmp(w, "right")) move(1, 0);
         else if (!strcmp(w, "up")) move(0, -1);
         else if (!strcmp(w, "down")) move(0, 1);
-        else if (!strcmp(w, "where")) { Row *r = &rows[cur_row]; logf_("where: row %d item %d %s", cur_row, r->sel, r->n ? r->items[r->sel].id : "-"); }
+        else if (!strcmp(w, "where")) {
+            Row *r = recents_open ? &rows[ROW_RECENTS] : &rows[cur_row];
+            if (recents_open) logf_("where: recents item %d part %d %s", r->sel, rec_part, r->n ? r->items[r->sel].id : "-");
+            else logf_("where: row %d item %d %s", cur_row, r->sel, r->n ? r->items[r->sel].id : "-");
+        }
+        else if (sscanf(w, "point:%f,%f", &px, &py) == 2) { dpad_mode = 0; pointer_motion(px, py, 0, 0); }
+        else if (sscanf(w, "click:%f,%f", &px, &py) == 2) { dpad_mode = 0; ok_press(1, px, py); ok_release(1, px, py); }
         else if (!strcmp(w, "ok")) { ok_press(0, 0, 0); ok_release(0, 0, 0); }
         else if (!strcmp(w, "back")) { if (!edit_key(0, 0, 0, 1)) cur_row = ROW_APPS; }
         else if (!strcmp(w, "saver")) screensaver();
