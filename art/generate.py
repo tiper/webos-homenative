@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 tiper
-"""Draw the wallpaper and icon Home Native ships (pkg/assets/wallpaper.png, pkg/icon.png).
+"""Draw the wallpaper and icons Home Native ships (pkg/assets/wallpaper.png, pkg/icon.png,
+pkg/largeIcon.png).
 
 Original art, made only from code: a near-black night with soft aurora ribbons low on the
 screen. Dark where the clock and the rows sit, and dim overall, which suits an OLED. The
@@ -65,5 +66,41 @@ def render(w, h, sx, sy, stars, seed):
 here = os.path.dirname(os.path.abspath(__file__))
 pkg = os.path.join(here, '..', 'pkg')
 png(os.path.join(pkg, 'assets', 'wallpaper.png'), 1920, 1080, render(1920, 1080, 4, 4, 260, 1))
-png(os.path.join(pkg, 'icon.png'), 130, 130, render(130, 130, 2, 2, 0, 2))
-print('wrote pkg/assets/wallpaper.png and pkg/icon.png')
+
+# The icon: the same night and aurora, and on it a house drawn as one white line (a roof that
+# overhangs, the walls, a door), round-capped like LG's own line icons. Anti-aliased by
+# sampling each pixel 4 x 4 against the distance to the line.
+HOUSE = [((0.19, 0.55), (0.50, 0.26)), ((0.50, 0.26), (0.81, 0.55)),   # roof
+         ((0.29, 0.47), (0.29, 0.77)), ((0.71, 0.47), (0.71, 0.77)),   # walls
+         ((0.29, 0.77), (0.43, 0.77)), ((0.57, 0.77), (0.71, 0.77)),   # floor, either side of the door
+         ((0.43, 0.77), (0.43, 0.61)), ((0.57, 0.77), (0.57, 0.61)), ((0.43, 0.61), (0.57, 0.61))]  # door
+STROKE = 0.027  # half the line's width
+
+def seg(px, py, a, b):
+    vx, vy = b[0] - a[0], b[1] - a[1]
+    t = max(0, min(1, ((px - a[0]) * vx + (py - a[1]) * vy) / (vx * vx + vy * vy)))
+    return math.hypot(px - a[0] - t * vx, py - a[1] - t * vy)
+
+def icon(size):
+    rows = render(size, size, 2, 2, 0, 2)
+    n = 4
+    for py in range(size):
+        row = rows[py]
+        for px in range(size):
+            cover = glow = 0
+            for sy_ in range(n):
+                for sx_ in range(n):
+                    x, y = (px + (sx_ + 0.5) / n) / size, (py + (sy_ + 0.5) / n) / size
+                    d = min(seg(x, y, a, b) for a, b in HOUSE)
+                    cover += d < STROKE
+                    glow += math.exp(-((d - STROKE) / 0.035) ** 2) if d > STROKE else 1
+            cover /= n * n; glow = 0.16 * glow / (n * n) * (1 - cover)
+            for ch in range(3):  # a faint halo, then the line
+                v = row[px * 3 + ch] / 255
+                v = v + (1 - v) * glow
+                row[px * 3 + ch] = int(255 * (v + (1 - v) * cover) + 0.5)
+    return rows
+
+png(os.path.join(pkg, 'icon.png'), 130, 130, icon(130))
+png(os.path.join(pkg, 'largeIcon.png'), 300, 300, icon(300))
+print('wrote pkg/assets/wallpaper.png, pkg/icon.png and pkg/largeIcon.png')

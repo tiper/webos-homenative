@@ -154,7 +154,7 @@ make ipk    # io.github.tiper.homenative_<version>_arm.ipk
 make dist   # dist/homenative-<version>.tar.gz: the ipk, the hook and the scripts
 ```
 
-The wallpaper and icon are drawn by `art/generate.py` (plain Python, no dependencies).
+The wallpaper and icons are drawn by `art/generate.py` (plain Python, no dependencies).
 
 GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)) builds every push
 and pull request with a pinned NDK release, and keeps the tarball and ipk as build artifacts.
@@ -170,8 +170,8 @@ git tag v0.1.0 && git push origin v0.1.0
 | `hook/10-homenative` | the boot hook that makes it the system Home |
 | `scripts/` | `install.sh`, `uninstall.sh`, `restore.sh`, run on the TV |
 | `scripts/dev/` | development checks and screenshot scripts (see [TESTING.md](TESTING.md)) |
-| `pkg/` | appinfo, icon and wallpaper; the build puts the binary here |
-| `art/` | the generator of the wallpaper and icon |
+| `pkg/` | appinfo, icons and wallpaper; the build puts the binary here |
+| `art/` | the generator of the wallpaper and icons |
 | `vendor/` | [cJSON](https://github.com/DaveGamble/cJSON) (MIT) |
 
 ### Development flags
