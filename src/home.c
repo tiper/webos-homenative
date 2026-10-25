@@ -810,7 +810,7 @@ static bool on_reply(LSHandle *h, LSMessage *msg, void *ctx) {
          * in standby): subscribe again, waiting longer after each failure, up to a minute.
          * A refusal will not change, so that one is left alone. */
         LSCallCancel(ls, c->token, NULL);
-        if (raw && (strstr(raw, "enied") || strstr(raw, "ermission"))) { logf_("  not retried"); }
+        if (raw && (strstr(raw, "enied") || strstr(raw, "ermission"))) { logf_("  not retried"); call_free(c); }
         else {
             c->backoff = c->backoff ? (c->backoff * 2 > 60 ? 60 : c->backoff * 2) : 2;
             g_timeout_add_seconds((guint)c->backoff, sub_retry, c);
