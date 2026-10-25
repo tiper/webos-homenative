@@ -2206,6 +2206,10 @@ static void render(void) {
     glViewport(0, 0, (GLsizei)W, (GLsizei)H);
     float dash = fminf(1.f, page / DASH_PAGE); /* 0 on the home screen, 1 on the dashboard */
     draw_calls = 0;
+    /* Cleared first, even under an opaque wallpaper: the wallpaper rises slower than the page
+     * (parallax) and leaves a strip at the bottom uncovered, and on this tile-based GPU a clear
+     * also spares reading the last frame back in. */
+    glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
     /* the wallpaper on the home screen; on the dashboard (LG's is black) its frosted copy,
      * cross-faded while the page scrolls. Each is one opaque full-screen draw when still. */
     const Tex *bgt = dash < 0.999f || !wallpaper_frost.id ? &wallpaper : &wallpaper_frost;
@@ -2226,10 +2230,7 @@ static void render(void) {
             if (wallpaper_frost.id) draw(0, 0, W, H, 0, 0, rgba(1, 1, 1, dash), &wallpaper_frost, 1, 1);
             else fill(0, 0, W, H, 0, rgba(0, 0, 0, dash));
         }
-    } else {
-        glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
-        glEnable(GL_BLEND);
-    }
+    } else glEnable(GL_BLEND);
 
     draw_text(&clock_tex, 64 + clock_dx, 36 + clock_dy - page, rgba(1, 1, 1, 1), 1);
     draw_text(&date_tex, 68 + clock_dx, 36 + clock_dy + (float)clock_tex.h - 6 - page, rgba(1, 1, 1, 0.8f), 1);
