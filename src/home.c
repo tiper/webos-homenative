@@ -179,8 +179,8 @@ static Col hexcol(const char *s, Col fallback) {
 static float luma(Col c) { return 0.299f * c.r + 0.587f * c.g + 0.114f * c.b; }
 
 static float g_alpha = 1.f;  /* multiplies every draw: fades an item in or out */
-static float tex_mode = 1.f;
-static float g_uvr[4] = {0, 0, 1, 1}; /* the part of the texture a draw shows (cover crops) */ /* 1: multiply by the texture, 2: use only its alpha */
+static float tex_mode = 1.f; /* 1: multiply by the texture, 2: use only its alpha */
+static float g_uvr[4] = {0, 0, 1, 1}; /* the part of the texture a draw shows (cover crops) */
 
 /* draw a rounded rect; tex may be NULL; soft > 1 grows the quad for soft edges (shadows) */
 /* the batch: pos 2, local+size 4, radius+soft 2, colour 4, gradient 2, uv rect 4, mode 1 */
@@ -336,7 +336,7 @@ static SDL_Surface *frost(SDL_Surface *src) {
 
 /* ---------- text ---------- */
 
-static TTF_Font *f_clock, *f_date, *f_pill, *f_tile;
+static TTF_Font *f_clock, *f_date;
 
 /* Render s, shortened with an ellipsis until it is at most maxw px wide (0 = no limit). */
 static Tex text_fit(TTF_Font *f, const char *s, int maxw) {
@@ -882,9 +882,7 @@ static char *copy_cmd;      /* pending "cp ...;" commands */
 static int copy_inflight;   /* one copy round at a time; each source is tried once */
 
 static void icon_cache_path(const char *src, char *out, size_t n) {
-    unsigned h = 2166136261u;
-    for (const char *p = src; *p; p++) h = (h ^ (unsigned char)*p) * 16777619u;
-    snprintf(out, n, "%s/iconcache/%08x.png", app_dir, h);
+    snprintf(out, n, "%s/iconcache/%08x.png", app_dir, fnv(src));
 }
 
 static void queue_copy(const char *src, const char *dst) {
@@ -894,7 +892,7 @@ static void queue_copy(const char *src, const char *dst) {
     Tex z = {0, 0, 0}; tcache_put(mark, z);
     char one[1400];
     snprintf(one, sizeof one, "cp -f %s %s;", src, dst);
-    if (copy_cmd && strstr(copy_cmd, one)) return;
+    if (copy_cmd && strstr(copy_cmd, one)) return; /* (a full cache cannot keep the mark) */
     size_t a = copy_cmd ? strlen(copy_cmd) : 0;
     copy_cmd = realloc(copy_cmd, a + strlen(one) + 1);
     strcpy(copy_cmd + a, one);
@@ -1731,7 +1729,6 @@ static float approach(float v, float target, float rate, float dt) {
 static float slot_of(const Item *it) { return fminf(1.f, it->life / SLOT_PART); }
 static float vis_of(const Item *it) { return fmaxf(0.f, (it->life - SLOT_PART) / (1.f - SLOT_PART)); }
 
-/* target x of item i before horizontal scrolling */
 /* every item's target x, once per frame (a running sum over the row) */
 static void layout_x(int ri) {
     Row *r = &rows[ri];
@@ -2156,8 +2153,8 @@ static void draw_recents(void) {
     rec_py = py; rec_close_r[0] = bx; rec_close_r[1] = by; rec_close_r[2] = bw; rec_close_r[3] = bh;
     rec_trash_on = 0;
     if (rec_close_f > 0.01f) draw(bx, by + 6, bw, bh, 6, 14, rgba(0, 0, 0, 0.5f * rec_close_f), NULL, 1, 1);
-    Col nb = hexcol("#7d848c", rgba(0.5f, 0.5f, 0.5f, 1)), fb = hexcol("#e6e6e6", rgba(0.9f, 0.9f, 0.9f, 1));
-    Col nt = fb, ft = hexcol("#4c5059", rgba(0.3f, 0.3f, 0.35f, 1));
+    const Col nb = {0x7d / 255.f, 0x84 / 255.f, 0x8c / 255.f, 1}, fb = {0xe6 / 255.f, 0xe6 / 255.f, 0xe6 / 255.f, 1};
+    const Col nt = fb, ft = {0x4c / 255.f, 0x50 / 255.f, 0x59 / 255.f, 1};
     float q = rec_close_f;
     fill(bx, by, bw, bh, 6, rgba(nb.r + (fb.r - nb.r) * q, nb.g + (fb.g - nb.g) * q, nb.b + (fb.b - nb.b) * q, 1));
     draw_text(&ct, bx + (bw - ct.w) * 0.5f, by + (bh - ct.h) * 0.5f, q > 0.5f ? ft : nt, 0);
@@ -2754,11 +2751,9 @@ int main(int argc, char **argv) {
 
     TTF_Init();
     IMG_Init(IMG_INIT_PNG);
-    const char *fr = "/usr/share/fonts/LG_Smart_UI-Regular.ttf", *fl = "/usr/share/fonts/LG_Smart_UI-Light.ttf";
+    const char *fl = "/usr/share/fonts/LG_Smart_UI-Light.ttf";
     f_clock = TTF_OpenFont(fl, 96); f_date = TTF_OpenFont(fl, 30); /* larger and lighter than LG's 72 / Regular 28 */
-    (void)fr;
-    f_pill = font(F_PILL); f_tile = font(F_TILE);
-    if (!f_clock || !f_pill) logf_("font: %s", TTF_GetError());
+    if (!f_clock || !font(F_PILL)) logf_("font: %s", TTF_GetError());
 
     /* five 60 px buttons, 20 apart, ending 38 px from the right edge, as LG places them */
     rows[ROW_TOP] = (Row){.kind = K_TOP, .y = 22, .gap = 20, .x0 = W - 38 - (5 * 60 + 4 * 20)};
