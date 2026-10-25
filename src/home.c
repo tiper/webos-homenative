@@ -1561,6 +1561,11 @@ static void apps_fix_sel(void) {
 }
 static int confirm_delete;   /* the confirm dialog's focused button: 1 Delete, 0 Cancel */
 static float trash_f, confirm_t, hide_f; /* animated: trash focus, dialog presence, eye focus */
+/* where the last frame put the eye and trash over the focused tile, and the dialog's buttons
+ * (Delete, Cancel), for the pointer; [0] < 0 when not drawn */
+static float ed_eye_r[4] = {-1}, ed_trash_r[4] = {-1}, ed_conf_r[2][4] = {{-1}, {-1}};
+static void set_rect(float *r, float x, float y, float w, float h) { r[0] = x; r[1] = y; r[2] = w; r[3] = h; }
+static int in_rect(const float *r, float x, float y) { return r[0] >= 0 && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]; }
 
 /* ---------- recents ----------
  * LG's Recents (HomeRecentInterfaces.qml / Recents.qml): Back on the home screen opens a panel
@@ -1991,6 +1996,7 @@ static void draw_app_tile(Item *it, float x, float y) {
     }
     if (edit_mode && f > 0.5f) { /* our eye (hide / show), and LG's trash right of it */
         float d = 60, ty = y0 - 16 - d, hx = it->removable ? cx - d - 8 : cx - d * 0.5f;
+        set_rect(ed_eye_r, hx, ty, d, d);
         fill(hx, ty, d, d, d * 0.5f, rgba(1, 1, 1, 0.22f + 0.78f * hide_f));
         Tex e = eye_tex(!it->hidden); /* what OK will do: hide (crossed) or show */
         draw_mask(hx + (d - e.w) * 0.5f, ty + (d - e.h) * 0.5f, (float)e.w, (float)e.h,
@@ -1998,6 +2004,7 @@ static void draw_app_tile(Item *it, float x, float y) {
     }
     if (edit_mode && f > 0.5f && it->removable) { /* LG's trash, over the tile */
         float d = 60, tx = cx + 8, ty = y0 - 16 - d;
+        set_rect(ed_trash_r, tx, ty, d, d);
         cx = tx + d * 0.5f;
         fill(tx, ty, d, d, d * 0.5f, rgba(1, 1, 1, 0.22f + 0.78f * trash_f));
         Tex ic = icon_load(trash_f > 0.5f ? HOME_IMG "ic_delete_f.png" : HOME_IMG "ic_delete_n.png");
@@ -2271,6 +2278,7 @@ static void render(void) {
     }
     /* apps: unfocused first, focused last so its shadow and scale sit on top */
     r = &rows[ROW_APPS];
+    ed_eye_r[0] = ed_trash_r[0] = ed_conf_r[0][0] = ed_conf_r[1][0] = -1;
     for (int pass = 0; pass < 3; pass++)
         for (int i = 0; i < r->n; i++) {
             Item *it = &r->items[i];
@@ -2333,6 +2341,7 @@ static void render(void) {
         for (int b = 0; b < 2; b++) {
             int is_del = b == 0, focused = confirm_delete == is_del;
             float bw = 300, bh = 70, bx = px + pw * 0.5f + (is_del ? -bw - 16 : 16), by = py + ph - bh - 50;
+            set_rect(ed_conf_r[b], bx, by, bw, bh);
             fill(bx, by, bw, bh, bh * 0.5f, focused ? rgba(1, 1, 1, 1) : rgba(1, 1, 1, 0.12f));
             Tex bt = text_cached(F_CARD_TITLE, 0, S(is_del ? S_DELETE : S_CANCEL));
             draw_text(&bt, bx + (bw - bt.w) * 0.5f, by + (bh - bt.h) * 0.5f, focused ? rgba(0.1f, 0.1f, 0.1f, 1) : rgba(1, 1, 1, 0.9f), 0);
@@ -2549,6 +2558,24 @@ static void recents_pointer(float x, float y) {
     else if (part == 1 || part == 2) rec_part = part;
 }
 
+/* the pointer in edit mode: 1 the eye, 2 the trash, 3 a tile (*i), 4 Delete, 5 Cancel, 0 nothing */
+static int edit_hit(float x, float y, int *i) {
+    if (edit_mode == ED_CONFIRM) return in_rect(ed_conf_r[0], x, y) ? 4 : in_rect(ed_conf_r[1], x, y) ? 5 : 0;
+    if (in_rect(ed_eye_r, x, y)) return 1;
+    if (in_rect(ed_trash_r, x, y)) return 2;
+    int ri;
+    return pointer_hit(x, y, &ri, i) && ri == ROW_APPS ? 3 : 0;
+}
+/* hovering moves the focus, as the arrows would; a carried tile goes only with the arrows */
+static void edit_pointer(float x, float y) {
+    int i = 0, part = edit_hit(x, y, &i);
+    if (part == 4 || part == 5) confirm_delete = part == 4;
+    else if (edit_mode == ED_MOVE || edit_mode == ED_CONFIRM) return;
+    else if (part == 1) edit_mode = ED_HIDE;
+    else if (part == 2) edit_mode = ED_TRASH;
+    else if (part == 3) { rows[ROW_APPS].sel = i; edit_mode = ED_BROWSE; }
+}
+
 static void pointer_motion(float x, float y, float dx, float dy) {
     if (dpad_mode) {
         motion_since_dpad += fabsf(dx) + fabsf(dy);
@@ -2557,7 +2584,7 @@ static void pointer_motion(float x, float y, float dx, float dy) {
         if (cursor_visibility) cursor_visibility(SDL_TRUE);
     }
     if (recents_open) { if (!closing_all) recents_pointer(x, y); return; }
-    if (edit_mode) return;
+    if (edit_mode) { edit_pointer(x, y); return; }
     int ri, i;
     if (pointer_hit(x, y, &ri, &i) && (ri != cur_row || i != rows[ri].sel)) {
         cur_row = ri; rows[ri].sel = i;
@@ -2637,6 +2664,16 @@ static void ok_release(int is_click, float x, float y) {
         else if (part >= 0) { if (part == 0) rows[ROW_RECENTS].sel = i; rec_part = part; recents_key(0, 0, 1, 0); }
         return;
     }
+    if (edit_mode && is_click) {
+        /* a click acts on what is under the pointer: a tile picks it up (or puts the carried one
+         * down), the eye and trash as OK on them; in the dialog, outside its buttons, cancels */
+        int i = 0, part = edit_hit(x, y, &i);
+        if (edit_mode == ED_CONFIRM) { confirm_delete = part == 4; if (part) edit_key(0, 0, 1, 0); else edit_key(0, 0, 0, 1); return; }
+        if (part == 0 || (edit_mode == ED_MOVE && (part != 3 || i != rows[ROW_APPS].sel))) return;
+        edit_pointer(x, y);
+        edit_key(0, 0, 1, 0);
+        return;
+    }
     if (edit_mode) { edit_key(0, 0, 1, 0); return; }
     if (is_click) {
         int ri, i;
@@ -2679,7 +2716,8 @@ static void dev_commands(void) {
         else if (!strcmp(w, "where")) {
             Row *r = recents_open ? &rows[ROW_RECENTS] : &rows[cur_row];
             if (recents_open) logf_("where: recents item %d part %d %s", r->sel, rec_part, r->n ? r->items[r->sel].id : "-");
-            else logf_("where: row %d item %d %s", cur_row, r->sel, r->n ? r->items[r->sel].id : "-");
+            else logf_("where: row %d item %d %s edit %d hidden %d eye %.0f,%.0f trash %.0f,%.0f", cur_row, r->sel, r->n ? r->items[r->sel].id : "-",
+                       edit_mode, r->n ? r->items[r->sel].hidden : 0, ed_eye_r[0] + 30, ed_eye_r[1] + 30, ed_trash_r[0] + 30, ed_trash_r[1] + 30);
         }
         else if (sscanf(w, "point:%f,%f", &px, &py) == 2) { dpad_mode = 0; pointer_motion(px, py, 0, 0); }
         else if (sscanf(w, "click:%f,%f", &px, &py) == 2) { dpad_mode = 0; ok_press(1, px, py); ok_release(1, px, py); }
