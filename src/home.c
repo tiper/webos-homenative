@@ -1187,11 +1187,16 @@ static void on_inputs(cJSON *root, const char *raw) {
             continue;
         Input *in = &inputs[ninputs++];
         scpy(in->app, sizeof in->app, jstr(d, "appId"));
-        /* the device's own HDMI-CEC name when it gives one (LG's getOSDName), else the label */
-        const char *name = "";
+        /* the device's own HDMI-CEC name when it gives one (LG's getOSDName); else, unless the
+         * input was renamed, the name LG's device detection found ("PS5"): the label it builds
+         * from that adds the type in the UI language ("PS5 Game Console"); else the label */
+        const char *name = "", *found = "";
         cJSON *sub;
-        cJSON_ArrayForEach(sub, cJSON_GetObjectItem(d, "subList"))
-            if (!*name && *jstr(sub, "osdName")) name = jstr(sub, "osdName");
+        cJSON_ArrayForEach(sub, cJSON_GetObjectItem(d, "subList")) {
+            if (!*name) name = jstr(sub, "osdName");
+            if (!*found) found = jstr(sub, "labelName");
+        }
+        if (!*name && !cJSON_IsTrue(cJSON_GetObjectItem(d, "modified"))) name = found;
         if (!*name) name = jstr(d, "label");
         scpy(in->name, sizeof in->name, *name ? name : jstr(d, "id"));
         /* "HDMI_1" -> "HDMI 1", the port under the name on LG's cards */
