@@ -13,7 +13,7 @@ E=/tmp/nh-empty-checkpoint
 # our binary in place of LG's Home
 grep -q " $H " /proc/mounts || mount --bind "$NH" "$H" || { echo "bind failed"; exit 1; }
 # an empty checkpoint on top of the one there now, so SAM cold-starts the binary instead of
-# restoring LG's snapshot (stacked: restore.sh lifts only this one, the boot hook's stays)
+# restoring LG's snapshot (stacked on any cover the boot hook made; restore.sh lifts them all)
 mkdir -p $E && mount --bind $E $CP
 echo "== mounts"; grep -E " $H | $CP " /proc/mounts
 # one instance only: close the dev app, stop LG's Home, start "Home"
