@@ -71,8 +71,7 @@ static void scpy(char *d, size_t n, const char *s) { snprintf(d, n, "%s", s ? s 
 typedef struct { GLuint id; int w, h; } Tex;
 
 static GLuint prog, prog_bg, vbo, batch_vbo, batch_ibo;
-static GLint u_screen;
-static GLint ub_rect, ub_screen, ab_pos;
+static GLint ub_rect;
 
 /* Batched: every rounded rect is four vertices carrying everything the old per-draw uniforms
  * did, so consecutive rects become one draw call (split only when the texture changes). Ten
@@ -137,14 +136,14 @@ static GLuint program(const char *vs, const char *fs) {
 static void gl_init(void) {
     prog_bg = program(VS_BG, FS_BG);
     glUseProgram(prog_bg);
-    ab_pos = 0;
-    ub_rect = glGetUniformLocation(prog_bg, "u_rect"); ub_screen = glGetUniformLocation(prog_bg, "u_screen");
+    ub_rect = glGetUniformLocation(prog_bg, "u_rect");
+    GLint ub_screen = glGetUniformLocation(prog_bg, "u_screen");
     glUniform1i(glGetUniformLocation(prog_bg, "u_tex"), 0);
     glUniform2f(ub_screen, W, H);
 
     prog = program(VS, FS);
     glUseProgram(prog);
-    u_screen = glGetUniformLocation(prog, "u_screen");
+    GLint u_screen = glGetUniformLocation(prog, "u_screen");
     glUniform1i(glGetUniformLocation(prog, "u_tex"), 0);
     glUniform2f(u_screen, W, H);
     /* indices for up to 4096 quads per draw call, built once */
@@ -785,6 +784,8 @@ static int call_via_hb(Call *c) {
 }
 
 static void call_free(Call *c) { free(c->payload); free(c); }
+/* the service refused this caller: asking again, the same way, will not help */
+static int refused(const char *raw) { return raw && (strstr(raw, "enied") || strstr(raw, "ermission")); }
 
 static int sub_start(Call *c);
 static gboolean sub_retry(gpointer p) {
@@ -810,7 +811,7 @@ static bool on_reply(LSHandle *h, LSMessage *msg, void *ctx) {
          * in standby): subscribe again, waiting longer after each failure, up to a minute.
          * A refusal will not change, so that one is left alone. */
         LSCallCancel(ls, c->token, NULL);
-        if (raw && (strstr(raw, "enied") || strstr(raw, "ermission"))) { logf_("  not retried"); call_free(c); }
+        if (refused(raw)) { logf_("  not retried"); call_free(c); }
         else {
             c->backoff = c->backoff ? (c->backoff * 2 > 60 ? 60 : c->backoff * 2) : 2;
             g_timeout_add_seconds((guint)c->backoff, sub_retry, c);
@@ -823,8 +824,7 @@ static bool on_reply(LSHandle *h, LSMessage *msg, void *ctx) {
         if (inner && c->cb) c->cb(inner, raw);
         cJSON_Delete(inner);
         call_free(c);
-    } else if (!ok && !c->sub && !strstr(c->uri, "hbchannel") &&
-               (strstr(raw ? raw : "", "enied") || strstr(raw ? raw : "", "ermission"))) {
+    } else if (!ok && !c->sub && !strstr(c->uri, "hbchannel") && refused(raw)) {
         if (!call_via_hb(c)) call_free(c);
     } else {
         if (c->cb) c->cb(root, raw);
@@ -912,6 +912,14 @@ static SDL_Thread *decoder;
 static char **pend; static int npend, cpend;
 static Tex wallpaper, wallpaper_frost;
 
+static void job_decode(Job *j) {
+    double a = now_ms();
+    j->s = decode_png(j->path);
+    if (!j->s) scpy(j->err, sizeof j->err, SDL_GetError()); /* SDL's error is per thread */
+    if (j->s && j->wallpaper) { j->blur = frost(j->s); scrim_wallpaper(j->s); }
+    j->ms = now_ms() - a;
+}
+
 static int decoder_main(void *unused) {
     (void)unused;
     for (;;) {
@@ -919,11 +927,7 @@ static int decoder_main(void *unused) {
         while (!todo_head) SDL_CondWait(dec_cond, dec_lock);
         Job *j = todo_head; todo_head = j->next; if (!todo_head) todo_tail = NULL;
         SDL_UnlockMutex(dec_lock);
-        double a = now_ms();
-        j->s = decode_png(j->path);
-        if (!j->s) scpy(j->err, sizeof j->err, SDL_GetError()); /* SDL's error is per thread */
-        if (j->s && j->wallpaper) { j->blur = frost(j->s); scrim_wallpaper(j->s); }
-        j->ms = now_ms() - a;
+        job_decode(j);
         SDL_LockMutex(dec_lock);
         j->next = done_head; done_head = j;
         SDL_UnlockMutex(dec_lock);
@@ -943,9 +947,7 @@ static void decoder_push(const char *key, const char *path, int is_wallpaper) {
     Job *j = calloc(1, sizeof *j);
     scpy(j->key, sizeof j->key, key); scpy(j->path, sizeof j->path, path); j->wallpaper = is_wallpaper;
     if (!decoder) { /* no thread: decode here */
-        j->s = decode_png(path);
-        if (!j->s) scpy(j->err, sizeof j->err, SDL_GetError());
-        if (j->s && is_wallpaper) { j->blur = frost(j->s); scrim_wallpaper(j->s); }
+        job_decode(j);
         j->next = done_head; done_head = j;
     } else {
         SDL_LockMutex(dec_lock);
@@ -1167,7 +1169,7 @@ static void on_launchpoints(cJSON *root, const char *raw) {
 
 typedef struct { char app[160], name[160], label[80], icon[512]; } Input;
 static Input inputs[16];
-static int ninputs = -1; /* -1: not known yet */
+static int ninputs;
 static char channel_mode[40] = "";
 static int airplay_on;
 
@@ -1611,16 +1613,14 @@ static void recents_show(int on);
 static int rec_part;          /* focus inside the panel: 0 the cards, 1 the trash, 2 Close All */
 static float recents_t, rec_trash_f, rec_close_f;
 /* where draw_recents last put things, for the pointer: the panel top, Close All, the trash */
-static float rec_py = H, rec_close_r[4], rec_trash_r[4];
-static int rec_trash_on;
+static float rec_py = H, rec_close_r[4] = {-1}, rec_trash_r[4] = {-1};
 
 static void on_recents(cJSON *root, const char *raw) {
     (void)raw;
     cJSON *list = cJSON_GetObjectItem(root, "recentsAppList");
     if (!cJSON_IsArray(list)) {
         /* after the first reply the service pushes one change at a time ({"eventType":"added",
-         * "appId":…}): read the whole list again */
-        /* one re-read for a burst of changes (closing four apps sends four) */
+         * "appId":…}): read the whole list again, once for a burst (closing four apps sends four) */
         if (cJSON_GetObjectItem(root, "eventType") && !recents_refetch_at) recents_refetch_at = now_ms() + 250;
         return;
     }
@@ -1952,6 +1952,12 @@ static void focus_glow(float x, float y, float w, float h, float rad, float f, C
 
 static Col on_tile(Col bg, float a) { return luma(bg) > 0.6f ? rgba(0.1f, 0.1f, 0.1f, a) : rgba(1, 1, 1, a); }
 
+/* LG's trash icon, centred in a d-wide button at x, y; its focused look past f 0.5 */
+static void draw_trash(float x, float y, float d, float f) {
+    Tex ic = icon_load(f > 0.5f ? HOME_IMG "ic_delete_f.png" : HOME_IMG "ic_delete_n.png");
+    draw_text(&ic, x + (d - ic.w) * 0.5f, y + (d - ic.h) * 0.5f, rgba(1, 1, 1, 1), 0);
+}
+
 static void draw_app_tile(Item *it, float x, float y) {
     float f = it->focus;
     float lift = edit_mode == ED_MOVE && f > 0.5f ? 1.f : 0.f;
@@ -1985,8 +1991,8 @@ static void draw_app_tile(Item *it, float x, float y) {
     }
     if (lift) { /* LG's arrows beside a tile being carried */
         Tex l = icon_load(HOME_IMG "arrow_left_n.png"), rr = icon_load(HOME_IMG "arrow_right_n.png");
-        if (l.id) draw(x0 - 12 - l.w, y0 + (w - l.h) * 0.5f, (float)l.w, (float)l.h, 0, 0, rgba(1, 1, 1, 1), &l, 1, 1);
-        if (rr.id) draw(x0 + w + 12, y0 + (w - rr.h) * 0.5f, (float)rr.w, (float)rr.h, 0, 0, rgba(1, 1, 1, 1), &rr, 1, 1);
+        draw_text(&l, x0 - 12 - l.w, y0 + (w - l.h) * 0.5f, rgba(1, 1, 1, 1), 0);
+        draw_text(&rr, x0 + w + 12, y0 + (w - rr.h) * 0.5f, rgba(1, 1, 1, 1), 0);
     }
     if (edit_mode && it->hidden) { /* a hidden app: a crossed eye in its corner */
         Tex e = eye_tex(1);
@@ -2005,10 +2011,8 @@ static void draw_app_tile(Item *it, float x, float y) {
     if (edit_mode && f > 0.5f && it->removable) { /* LG's trash, over the tile */
         float d = 60, tx = cx + 8, ty = y0 - 16 - d;
         set_rect(ed_trash_r, tx, ty, d, d);
-        cx = tx + d * 0.5f;
         fill(tx, ty, d, d, d * 0.5f, rgba(1, 1, 1, 0.22f + 0.78f * trash_f));
-        Tex ic = icon_load(trash_f > 0.5f ? HOME_IMG "ic_delete_f.png" : HOME_IMG "ic_delete_n.png");
-        if (ic.id) draw(cx - ic.w * 0.5f, ty + (d - ic.h) * 0.5f, (float)ic.w, (float)ic.h, 0, 0, rgba(1, 1, 1, 1), &ic, 1, 1);
+        draw_trash(tx, ty, d, trash_f);
     }
 }
 
@@ -2027,7 +2031,7 @@ static void draw_pill(Item *it, float x, float y, float w) {
         draw_mask(tx, cy - ih * 0.5f, iw, ih, fg, &it->icon_tex);
         tx += 38 * s;
     }
-    if (it->title_tex.id) draw(tx, cy - it->title_tex.h * 0.5f, (float)it->title_tex.w, (float)it->title_tex.h, 0, 0, fg, &it->title_tex, 1, 1);
+    draw_text(&it->title_tex, tx, cy - it->title_tex.h * 0.5f, fg, 0);
 }
 
 /* how much focus the cards under a heading spanning x .. x + w have (0..1) */
@@ -2078,14 +2082,6 @@ static void draw_card(Row *r, Item *it, float x, float y) {
     if (k == K_HOMEDASH) {
         fill(x0, y0, w, h, rad, rgba(0.30f, 0.40f, 0.34f, 1));
         draw(x0, y0, w, h, rad, 0, rgba(0.56f, 0.66f, 0.58f, 1), NULL, 1, 0); /* lighter at the top */
-        if (it->image_tex.id) {
-            /* cover: crop the image to the card's aspect through the texture coordinates */
-            float ia = it->image_tex.w / (float)it->image_tex.h, ca = w / h;
-            if (ia > ca) { g_uvr[2] = ca / ia; g_uvr[0] = (1 - g_uvr[2]) * 0.5f; }
-            else { g_uvr[3] = ia / ca; g_uvr[1] = (1 - g_uvr[3]) * 0.5f; }
-            draw(x0, y0, w, h, rad, 0, rgba(1, 1, 1, 1), &it->image_tex, 1, 1);
-            g_uvr[0] = g_uvr[1] = 0; g_uvr[2] = g_uvr[3] = 1;
-        }
         float th = it->title_tex.id ? (float)it->title_tex.h : 0, lh = it->sub_tex.id ? 16 * s : 0;
         float is = 64 * s, total = is + 10 * s + th + (lh ? 8 * s + lh : 0), yy = y0 + (h - total) * 0.5f;
         if (it->icon_tex.id) draw(cx - is * 0.5f, yy, is, is, 0, 0, rgba(1, 1, 1, 1), &it->icon_tex, 1, 1);
@@ -2157,8 +2153,8 @@ static void draw_recents(void) {
     /* measured off LG's screen: the label sits in 34 px of padding a side (its margin items
      * plus the label area's own inset) */
     float bw = fmaxf(150.f, ct.w + 68.f), bh = 60, bx = W - 48 - bw, by = py + 40;
-    rec_py = py; rec_close_r[0] = bx; rec_close_r[1] = by; rec_close_r[2] = bw; rec_close_r[3] = bh;
-    rec_trash_on = 0;
+    rec_py = py; set_rect(rec_close_r, bx, by, bw, bh);
+    rec_trash_r[0] = -1;
     if (rec_close_f > 0.01f) draw(bx, by + 6, bw, bh, 6, 14, rgba(0, 0, 0, 0.5f * rec_close_f), NULL, 1, 1);
     const Col nb = {0x7d / 255.f, 0x84 / 255.f, 0x8c / 255.f, 1}, fb = {0xe6 / 255.f, 0xe6 / 255.f, 0xe6 / 255.f, 1};
     const Col nt = fb, ft = {0x4c / 255.f, 0x50 / 255.f, 0x59 / 255.f, 1};
@@ -2181,7 +2177,7 @@ static void draw_recents(void) {
             if (f > 0.01f) focus_glow(x0, y0, w, h, 2, f, rgba(1, 1, 1, 1));
             Col bg = it->color; bg.a = 1;
             fill(x0, y0, w, h, 2, bg);
-            if (it->image_tex.id) {
+            if (it->image_tex.id) { /* cover: crop the snapshot to the card's aspect */
                 float ia = it->image_tex.w / (float)it->image_tex.h, ca = w / h;
                 if (ia > ca) { g_uvr[2] = ca / ia; g_uvr[0] = (1 - g_uvr[2]) * 0.5f; }
                 else { g_uvr[3] = ia / ca; g_uvr[1] = (1 - g_uvr[3]) * 0.5f; }
@@ -2197,10 +2193,9 @@ static void draw_recents(void) {
             }
             if (f > 0.5f) { /* the trash over the focused card closes that app */
                 float d = 56, tx = cx - d * 0.5f, ty = y0 - 18 - d;
-                rec_trash_on = 1; rec_trash_r[0] = tx; rec_trash_r[1] = ty; rec_trash_r[2] = d; rec_trash_r[3] = d;
+                set_rect(rec_trash_r, tx, ty, d, d);
                 if (rec_trash_f > 0.01f) fill(tx, ty, d, d, d * 0.5f, rgba(1, 1, 1, rec_trash_f));
-                Tex ic = icon_load(rec_trash_f > 0.5f ? HOME_IMG "ic_delete_f.png" : HOME_IMG "ic_delete_n.png");
-                if (ic.id) draw(cx - ic.w * 0.5f, ty + (d - ic.h) * 0.5f, (float)ic.w, (float)ic.h, 0, 0, rgba(1, 1, 1, 1), &ic, 1, 1);
+                draw_trash(tx, ty, d, rec_trash_f);
             }
             g_alpha = 1;
         }
@@ -2252,7 +2247,7 @@ static void render(void) {
         }
     }
 
-    /* inputs: pills (hidden while an app is being moved: the hint takes their place) */
+    /* inputs: pills (hidden in edit mode: the hint takes their place) */
     Row *r = &rows[ROW_INPUTS];
     float ry = r->y - page;
     if (!edit_mode && ry > -PILL_H)
@@ -2536,11 +2531,9 @@ static Item *pointer_hit(float x, float y, int *ri_out, int *i_out) {
 /* the pointer over the Recents panel: 0 a card (*i), 1 the focused card's trash, 2 Close All,
  * -1 the panel but nothing on it, -2 above the panel */
 static int recents_hit(float x, float y, int *i) {
-    #define IN(r) (x >= (r)[0] && x <= (r)[0] + (r)[2] && y >= (r)[1] && y <= (r)[1] + (r)[3])
     if (y < rec_py) return -2;
-    if (IN(rec_close_r)) return 2;
-    if (rec_trash_on && IN(rec_trash_r)) return 1;
-    #undef IN
+    if (in_rect(rec_close_r, x, y)) return 2;
+    if (in_rect(rec_trash_r, x, y)) return 1;
     Row *r = &rows[ROW_RECENTS];
     float cy = rec_py + 180;
     for (int k = 0; k < r->n; k++) {
@@ -2871,7 +2864,6 @@ int main(int argc, char **argv) {
                 else if (k == SDLK_UP) move(0, -1);
                 else if (k == SDLK_DOWN) move(0, 1);
                 else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) { if (!ev.key.repeat) ok_press(0, 0, 0); }
-                /* the remote's Back arrives from LG's SDL as scancode 482 with no keysym */
                 else if (is_back(&ev)) back_short();
                 else if (ev.key.keysym.scancode == SCAN_BLUE) { if (!ev.key.repeat) blue_press(); }
                 else logf_("key sym=%d scan=%d", k, ev.key.keysym.scancode);
