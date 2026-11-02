@@ -77,9 +77,12 @@ channel names come from the TV itself.
 2. Copy it to the TV and unpack it:
 
    ```bash
-   scp homenative-0.1.0.tar.gz root@<tv-ip>:/tmp/
+   scp -O homenative-0.1.0.tar.gz root@<tv-ip>:/tmp/
    ssh root@<tv-ip> 'cd /tmp && tar xzf homenative-0.1.0.tar.gz'
    ```
+
+   `-O` makes `scp` use its classic protocol: the TV's SSH server (Dropbear) has no SFTP, which
+   newer `scp` uses by default and then hangs.
 
 3. Install the app and its boot hook, then reboot:
 
@@ -93,7 +96,7 @@ and the Home key opens it instantly. Nothing on the TV's read-only system partit
 ### Your own wallpaper
 
 ```bash
-scp my-wallpaper.png root@<tv-ip>:/var/lib/homenative/wallpaper.png
+scp -O my-wallpaper.png root@<tv-ip>:/var/lib/homenative/wallpaper.png
 ```
 
 Use 1920 × 1080 in PNG or JPEG. It's picked up the next time Home starts (reboot, or run
