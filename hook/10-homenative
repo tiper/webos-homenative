@@ -45,7 +45,6 @@ swap_if_lg() {
     [ -z "$(pidof com.webos.app.home)" ] &&
       luna-send -n 1 luna://com.webos.applicationManager/launch '{"id":"com.webos.app.home"}' >/dev/null 2>&1
   fi
-  preload
 }
 # Start ours in the background, as SAM itself does later in boot, so Home is ready at once.
 preload() {
@@ -60,5 +59,6 @@ preload() {
   preload
   sleep 20
   swap_if_lg
+  preload
 ) &
 exit 0
