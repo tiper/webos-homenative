@@ -987,7 +987,9 @@ static int decoder_poll(int max) {
     return n;
 }
 
-/* versioned: the key carries the file's mtime, for pictures rewritten in place (recents snapshots) */
+/* versioned: the key carries the file's mtime, for pictures rewritten in place (recents
+ * snapshots, an updated app's icon). The file itself when we can read it (as Home), else our
+ * copy (the dev app) */
 static Tex icon_load_(const char *src, int versioned) {
     Tex z = {0, 0, 0};
     if (!src || !*src || strncmp(src, "/", 1)) return z; /* local files only */
@@ -999,8 +1001,8 @@ static Tex icon_load_(const char *src, int versioned) {
     if (c) return *c;
     if (pending(key)) return z;
     char cp[PATH_MAX + 32]; icon_cache_path(src, cp, sizeof cp);
-    if (access(cp, R_OK) == 0) decoder_push(key, cp, 0);
-    else if (access(src, R_OK) == 0) decoder_push(key, src, 0);
+    if (access(src, R_OK) == 0) decoder_push(key, src, 0);
+    else if (access(cp, R_OK) == 0) decoder_push(key, cp, 0);
     else queue_copy(src, cp);
     return z;
 }
@@ -1794,7 +1796,7 @@ static void layout_rows(void) {
 static void load_item(int ri, Item *it) {
     Row *r = &rows[ri];
     Kind k = item_kind(r, it);
-    if (it->icon[0]) it->icon_tex = icon_load(it->icon);
+    if (it->icon[0]) it->icon_tex = icon_load_(it->icon, k == K_APP || k == K_RECENT);
     if (it->image[0]) it->image_tex = icon_load_(it->image, k == K_RECENT);
     float w = item_w(r, it);
     switch (k) {
