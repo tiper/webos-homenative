@@ -11,6 +11,7 @@
 !/pkg/
 !/hook/
 !/scripts/
+!/tests/
 !/art/
 !/docs/
 !/LICENSE
