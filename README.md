@@ -68,8 +68,9 @@ It's built for TVs that stay in Quick Start+ standby for weeks:
   [RootMyTV](https://rootmy.tv) or [faultmanager-autoroot](https://github.com/throwaway96/faultmanager-autoroot)).
 - A computer on the same network to copy the files over.
 
-UI text comes in English and Portuguese, picked from the TV's language. App, input and
-channel names come from the TV itself.
+UI text comes in English, Portuguese, Spanish, French, German and Italian, picked from the TV's
+language. App, input and channel names come from the TV itself. Names in scripts the UI font
+doesn't cover (Japanese, Arabic and so on) may not draw properly yet.
 
 ## Install
 
@@ -137,6 +138,12 @@ Homebrew Channel's `init.d`, about 40 seconds after boot. It:
 3. closes LG's Home and preloads Home Native hidden in the background.
 
 The changes are mounts made at boot, so a reboot without the hook undoes them completely.
+
+Home Native is the only Home on the TV while it runs, so it looks after itself. If it starts four
+times in a row without surviving a minute, it lifts its mounts and becomes LG's Home in the same
+process, and the hook won't mount that build again until a different one is installed. A watchdog
+kills it if the main loop stops for 90 seconds, which counts as one of those starts. The previous
+log is kept at `/tmp/homenative.log.prev`, with a backtrace if it crashed.
 
 As Home, the binary registers on the system bus as `com.webos.app.home`, which inherits Home's
 permissions. It also subscribes to `applicationManager/registerApp`, so each Home key press

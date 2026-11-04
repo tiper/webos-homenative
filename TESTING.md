@@ -19,6 +19,23 @@ mount keeps the old binary until a reboot).
 6. **Memory.** `scripts/dev/memcheck.sh` and `scripts/dev/memopen.sh`, as before (Home about 12 MB
    proportional set size when open).
 
+7. **Safety net.** Install a build that exits at once, then reboot: Home restarts four times, then
+   LG's Home appears, `/var/lib/homenative/failed` holds the build's md5, and after another reboot
+   the hook log says `this build failed`. Installing a good build clears it.
+8. **Watchdog.** `kill -STOP` then `-CONT` after 90 s: Home dies, SAM restarts it, the log kept in
+   `/tmp/homenative.log.prev` ends in the backtrace.
+9. **Sleeping while hidden.** With an app in front, Home's voluntary context
+   switches stay near 1 a second (about 100 before), and the log says `sleeping on the Wayland
+   socket`, with no `stays readable` line. Home key response is unchanged.
+10. **Languages and clock.** Change the TV's language: pills and headings follow without a restart.
+    A US region shows `3:12 PM`.
+11. **A JPEG wallpaper** at `/var/lib/homenative/wallpaper.jpg` shows; a corrupt one falls back to
+    the shipped picture.
+
+The host test (`tests/host/run.sh [seeds] [frames]`) runs the real `src/home.c` against a fake TV
+under ASan and UBSan, with random keys and hostile service replies. It needs a C compiler and
+GLib, not a TV, and CI runs it.
+
 Not known yet: whether the GL context survives every standby cycle (all textures would be lost
 and Home would draw black). If that ever happens, Home needs to recreate its textures on
 `SDL_RENDER_DEVICE_RESET` / context loss.

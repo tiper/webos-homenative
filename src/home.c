@@ -1630,7 +1630,8 @@ static void on_locale(cJSON *root, const char *raw) {
     char lang[8]; scpy(lang, sizeof lang, ui);
     char *dash = strchr(lang, '-'); if (dash) *dash = 0;
     /* the setting when there is one, else what the region's clocks say */
-    const char *ck = jstr(li, "clock"), *region = strrchr(ui, '-');
+    const char *fmt = jstr(cJSON_GetObjectItem(li, "locales"), "FMT");
+    const char *ck = jstr(li, "clock"), *region = strrchr(*fmt ? fmt : ui, '-');
     static const char regions12[] = " US CA AU NZ PH IN KR MY SG SA EG PK BD CO ";
     char want[6] = ""; if (region) snprintf(want, sizeof want, " %.2s ", region + 1);
     int h12 = !strcmp(ck, "12") || (strcmp(ck, "24") && *want && strstr(regions12, want));
