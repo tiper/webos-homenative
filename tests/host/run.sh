@@ -12,10 +12,10 @@ ${CC:-cc} $FLAGS -w -include tests/host/shim.h -Dmain=homenative_main -c src/hom
 ${CC:-cc} $FLAGS -w -c tests/host/fake.c -o "$OUT.fake.o"
 ${CC:-cc} $FLAGS -w -c vendor/cJSON.c -o "$OUT.cjson.o"
 ${CC:-cc} -fsanitize=address,undefined "$OUT.home.o" "$OUT.fake.o" "$OUT.cjson.o" $(pkg-config --libs glib-2.0) -lm -lpthread -o "$OUT"
-export ASAN_OPTIONS=detect_leaks=0:abort_on_error=0:log_path=$OUT.report UBSAN_OPTIONS=print_stacktrace=1:log_path=$OUT.report
+export ASAN_OPTIONS=detect_leaks=0:abort_on_error=0:allow_user_segv_handler=0:log_path=$OUT.report UBSAN_OPTIONS=print_stacktrace=1:log_path=$OUT.report
 fail=0
 for s in $(seq 1 "$SEEDS"); do
-  rm -f "$OUT".report.*
+  rm -f "$OUT".report.* /tmp/homenative-starts
   if ! r=$("$OUT" "$s" "$FRAMES" 2>/dev/null); then echo "seed $s: $r"; cat "$OUT".report.* 2>/dev/null | head -40; fail=1; break; fi
   echo "seed $s: $r"
 done

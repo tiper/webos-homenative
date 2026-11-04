@@ -17,6 +17,15 @@ E=/tmp/homenative-checkpoint
 [ -f /var/lib/homenative/disabled ] && exit 0
 [ -x "$NH" ] || exit 0
 
+ours=$(md5sum < "$NH")
+log() { echo "$(cut -d" " -f1 /proc/uptime) $*" >> /tmp/homenative-hook.log; }
+# This build kept crashing and stepped aside (see "safety net" in src/home.c): LG's Home stays,
+# until a different build is installed.
+if [ "$(cat /var/lib/homenative/failed 2>/dev/null)" = "$ours" ]; then
+  log "this build failed: leaving LG's Home"
+  exit 0
+fi
+
 grep -q " $H " /proc/mounts || mount --bind "$NH" "$H" || exit 0
 mkdir -p $E
 if ! grep " $CP " /proc/mounts | tail -1 | grep -q "^tmpfs .* ro,"; then
@@ -27,8 +36,6 @@ fi
 # hooks. Swap it for ours right away. It is brought to the front only if Home was there, so live
 # TV or HDMI is never interrupted; otherwise ours is preloaded hidden (SAM would only start Home
 # itself at ~70 s). A second look a little later catches anything that brought LG's back.
-ours=$(md5sum < "$NH")
-log() { echo "$(cut -d" " -f1 /proc/uptime) $*" >> /tmp/homenative-hook.log; }
 log "mounted"
 swap_if_lg() {
   lg=""

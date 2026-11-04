@@ -32,7 +32,7 @@ echo "== installing the boot hook"
 cp "$D/10-homenative" $HOOKS/10-homenative && chmod 755 $HOOKS/10-homenative || fail "cannot write $HOOKS"
 sh -n $HOOKS/10-homenative || fail "the hook does not parse"
 mkdir -p /var/lib/homenative
-rm -f /var/lib/homenative/disabled
+rm -f /var/lib/homenative/disabled /var/lib/homenative/failed
 # /tmp is emptied at every boot: keep the way back next to the settings
 for f in uninstall.sh restore.sh; do [ -f "$D/$f" ] && cp "$D/$f" /var/lib/homenative/$f; done
 

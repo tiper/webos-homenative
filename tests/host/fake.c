@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_syswm.h>
 #include <SDL2/SDL_image.h>
 #include <GLES2/gl2.h>
 #include <luna-service2/lunaservice.h>
@@ -109,7 +110,9 @@ static void *thread_start(void *p) { Start s = *(Start *)p; free(p); s.fn(s.arg)
 SDL_Thread *SDL_CreateThread(int (*fn)(void *), const char *n, void *arg) { (void)n; Start *s = malloc(sizeof *s); s->fn = fn; s->arg = arg; pthread_t t; pthread_create(&t, NULL, thread_start, s); pthread_detach(t); return (SDL_Thread *)1; }
 
 /* ---------- remote ---------- */
-static int shown = 1;
+guint fake_timeout(guint ms, GSourceFunc cb, gpointer p) { clock_us += (Uint64)ms * 1000; return g_idle_add(cb, p); }
+void SDL_GetVersion(SDL_version *v) { v->major = 2; v->minor = 0; v->patch = 10; }
+SDL_bool SDL_GetWindowWMInfo(SDL_Window *w, SDL_SysWMinfo *i) { (void)w; (void)i; return SDL_FALSE; }
 static void luna_tick(void);
 static int make_event(SDL_Event *e) {
     memset(e, 0, sizeof *e);
