@@ -2984,7 +2984,7 @@ static void dev_commands(void) {
  * hook from mounting that same build again; a new build gets a new chance. A clean exit (a plain
  * kill arrives as SDL_QUIT) clears the count too: only dying counts. A hang gets no such
  * luck by itself, hence the watchdog: the main loop re-arms an alarm, and if it stops doing so
- * for WATCHDOG_S the process dies and SAM restarts it, which counts as a start like any other. */
+ * for WATCHDOG_S the process dies and it is restarted, which counts as a start like any other. */
 #define STARTS_PATH "/tmp/homenative-starts"
 #define FAILED_PATH "/var/lib/homenative/failed"
 #define START_LIMIT 4

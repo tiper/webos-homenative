@@ -147,7 +147,7 @@ times in a row, each lasting under ten minutes, without being told to quit, it l
 process, and the hook won't mount that build again until a different one is installed. A watchdog
 kills it if the main loop stops for 90 seconds, which counts as one of those starts. The previous
 log is kept at `/tmp/homenative.log.prev`, with a backtrace if it crashed. The boot hook also
-leaves a small watcher running, because webOS doesn't restart a Home that dies in standby.
+leaves a small watcher running, because webOS doesn't restart a Home that dies behind an app or in standby.
 
 As Home, the binary registers on the system bus as `com.webos.app.home`, which inherits Home's
 permissions. It also subscribes to `applicationManager/registerApp`, so each Home key press

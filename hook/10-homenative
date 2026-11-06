@@ -72,10 +72,10 @@ preload() {
   preload
 ) &
 
-# With the TV on, SAM restarts a Home that dies. In standby it doesn't, and waking doesn't either,
-# so Home stays gone until someone presses the Home key and waits for a cold start. Two looks a
-# little apart, so this never races SAM, and it ends once the mounts are lifted. Should the app
-# on screen lose the front to the preload, it gets it back.
+# SAM doesn't restart a Home that dies behind another app or in standby, and waking the TV doesn't
+# either, so Home stays gone until someone presses the Home key and waits for a cold start. Two
+# looks a little apart, so this doesn't race SAM, and it ends once the mounts are lifted. A preload
+# takes the front from the app on screen, so that app gets it back.
 W=/tmp/homenative-watch
 kill "$(cat $W 2>/dev/null)" 2>/dev/null
 (
