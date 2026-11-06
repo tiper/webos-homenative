@@ -2,6 +2,7 @@
 /* Force-included ahead of src/home.c: what it asks the file system about goes to fake.c, where
  * made-up paths exist. */
 #pragma once
+#define _GNU_SOURCE /* first, as in home.c: the headers below would otherwise settle without it (Dl_info) */
 #include <sys/stat.h>
 #include <unistd.h>
 #include <glib.h>
