@@ -24,7 +24,7 @@ mount keeps the old binary until a reboot).
    the hook log says `this build failed`. Installing a good build clears it.
 8. **Watchdog.** `kill -STOP` then `-CONT` after 90 s: Home dies, and its log ends in `fatal signal 14` with
    `pc` and `lr` lines from the main thread. SAM restarts it with the TV on, and the log moves to
-   `/tmp/homenative.log.prev`. In standby SAM doesn't, and Home starts on the next wake.
+   `/tmp/homenative.log.prev`. In standby the hook's watcher does, within about a minute.
 9. **Sleeping while hidden.** With an app in front, Home's voluntary context
    switches stay near 1 a second (about 100 before), and the log says `sleeping on the Wayland
    socket`, with no `stays readable` line. Home key response is unchanged.
@@ -38,7 +38,10 @@ mount keeps the old binary until a reboot).
 13. **Restarting isn't crashing.** After a plain `kill` of Home, `/tmp/homenative-starts` is gone.
 14. **Panel off.** In standby, `kill -9` Home: the new one stays up past 90 s. If the first frame
     blocked with the panel off, the watchdog would end it here.
-15. **Other scripts.** An app with a Japanese or Thai title shows real letters.
+15. **Home comes back.** In standby, `kill -9` Home: about a minute later it is running again, and
+    with Live TV on, a `kill -9` of Home never leaves Live TV covered. `/tmp/homenative-hook.log`
+    says `preloading`.
+16. **Other scripts.** An app with a Japanese or Thai title shows real letters.
 
 The host test (`tests/host/run.sh [seeds] [frames]`) runs the real `src/home.c` against a fake TV
 under ASan and UBSan, with random keys and hostile service replies. It needs a C compiler and

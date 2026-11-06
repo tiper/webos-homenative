@@ -9,6 +9,7 @@ Stability
   log.
 - Home restarts if it loses the display connection or can't reach the system bus, instead of
   staying up with nothing working.
+- A Home that dies in standby comes back within a minute. webOS doesn't restart it, even on wake.
 - A subscription that can't start at boot keeps trying, and data missing at boot is asked for again
   rather than 30 minutes later.
 - Fixed a stack overflow on very long names (the delete dialog).
@@ -39,7 +40,7 @@ Polish
 - The clock follows a daylight-saving change while Home stays on screen.
 
 Install
-- `install.sh` upgrades in place, with no reboot.
+- `install.sh` upgrades in place, with no reboot, and leaves the app on screen in front.
 - `uninstall.sh` brings LG's Home back at once.
 
 Tests

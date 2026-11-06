@@ -49,7 +49,15 @@ if grep -q " $H " /proc/mounts; then
   if [ -z "$(pidof com.webos.app.home)" ]; then
     if [ "$fg" = "com.webos.app.home" ]; then p='{"id":"com.webos.app.home"}'; else p='{"id":"com.webos.app.home","preload":"full"}'; fi
     luna-send -n 1 luna://com.webos.applicationManager/launch "$p" >/dev/null 2>&1
+    sleep 3
+    now=$(luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo '{}' 2>/dev/null |
+      sed -n 's/.*"appId": *"\([^"]*\)".*/\1/p')
+    if [ -n "$fg" ] && [ "$fg" != "com.webos.app.home" ] && [ "$now" = "com.webos.app.home" ]; then
+      luna-send -n 1 luna://com.webos.applicationManager/launch "{\"id\":\"$fg\"}" >/dev/null 2>&1
+    fi
   fi
+  # the hook, again: its watch on Home starts now rather than at the next boot
+  sh $HOOKS/10-homenative
   echo
   echo "Done. The new build is running."
 else

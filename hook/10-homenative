@@ -37,14 +37,17 @@ fi
 # TV or HDMI is never interrupted; otherwise ours is preloaded hidden (SAM would only start Home
 # itself at ~70 s). A second look a little later catches anything that brought LG's back.
 log "mounted"
+foreground() {
+  luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo '{}' 2>/dev/null |
+    sed -n 's/.*"appId": *"\([^"]*\)".*/\1/p'
+}
 swap_if_lg() {
   lg=""
   for P in $(pidof com.webos.app.home); do
     [ "$(md5sum < /proc/$P/exe 2>/dev/null)" = "$ours" ] || lg="$lg $P"
   done
   [ -n "$lg" ] || return 0
-  fg=$(luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo '{}' 2>/dev/null |
-    sed -n 's/.*"appId": *"\([^"]*\)".*/\1/p')
+  fg=$(foreground)
   log "killing LG Home$lg (foreground: $fg)"
   kill -9 $lg
   sleep 1
@@ -68,4 +71,28 @@ preload() {
   swap_if_lg
   preload
 ) &
+
+# With the TV on, SAM restarts a Home that dies. In standby it doesn't, and waking doesn't either,
+# so Home stays gone until someone presses the Home key and waits for a cold start. Two looks a
+# little apart, so this never races SAM, and it ends once the mounts are lifted. Should the app
+# on screen lose the front to the preload, it gets it back.
+W=/tmp/homenative-watch
+kill "$(cat $W 2>/dev/null)" 2>/dev/null
+(
+  gone=0
+  while sleep 30 && grep -q " $H " /proc/mounts; do
+    if [ -n "$(pidof com.webos.app.home)" ]; then gone=0; continue; fi
+    gone=$((gone + 1))
+    [ $gone -lt 2 ] && continue
+    gone=0
+    fg=$(foreground)
+    preload
+    sleep 3
+    if [ -n "$fg" ] && [ "$fg" != "com.webos.app.home" ] && [ "$(foreground)" = "com.webos.app.home" ]; then
+      log "giving the front back to $fg"
+      luna-send -n 1 luna://com.webos.applicationManager/launch "{\"id\":\"$fg\"}" >/dev/null 2>&1
+    fi
+  done
+) </dev/null >/dev/null 2>&1 &
+echo $! > $W
 exit 0
