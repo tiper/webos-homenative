@@ -36,7 +36,25 @@ rm -f /var/lib/homenative/disabled /var/lib/homenative/failed
 # /tmp is emptied at every boot: keep the way back next to the settings
 for f in uninstall.sh restore.sh; do [ -f "$D/$f" ] && cp "$D/$f" /var/lib/homenative/$f; done
 
-echo
-echo "Done. Reboot the TV (reboot) and Home Native is the Home from then on."
+# Already the Home: the mount still holds the old binary, so point it at the new one and restart.
+# Nothing else on screen is touched: Home comes to the front only if it was there.
+H=/usr/bin/com.webos.app.home
+if grep -q " $H " /proc/mounts; then
+  echo "== switching to the new build"
+  fg=$(luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo '{}' 2>/dev/null |
+    sed -n 's/.*"appId": *"\([^"]*\)".*/\1/p')
+  umount -l "$H" && mount --bind "$APP/homenative" "$H" || fail "cannot swap the mount: reboot to finish"
+  pid=$(pidof com.webos.app.home); [ -n "$pid" ] && kill $pid
+  sleep 2
+  if [ -z "$(pidof com.webos.app.home)" ]; then
+    if [ "$fg" = "com.webos.app.home" ]; then p='{"id":"com.webos.app.home"}'; else p='{"id":"com.webos.app.home","preload":"full"}'; fi
+    luna-send -n 1 luna://com.webos.applicationManager/launch "$p" >/dev/null 2>&1
+  fi
+  echo
+  echo "Done. The new build is running."
+else
+  echo
+  echo "Done. Reboot the TV (reboot) and Home Native is the Home from then on."
+fi
 echo "Your own wallpaper: put it at /var/lib/homenative/wallpaper.png (or .jpg), 1920 x 1080."
 echo "To undo later: sh /var/lib/homenative/uninstall.sh (or restore.sh for LG's Home until reboot)."

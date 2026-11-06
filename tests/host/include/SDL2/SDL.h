@@ -35,3 +35,4 @@ void SDL_GL_GetDrawableSize(SDL_Window *, int *, int *); void SDL_GetWindowSize(
 int SDL_GetCurrentDisplayMode(int, SDL_DisplayMode *); int SDL_PollEvent(SDL_Event *); int SDL_WaitEventTimeout(SDL_Event *, int);
 SDL_mutex *SDL_CreateMutex(void); int SDL_LockMutex(SDL_mutex *); int SDL_UnlockMutex(SDL_mutex *); SDL_cond *SDL_CreateCond(void); int SDL_CondWait(SDL_cond *, SDL_mutex *); int SDL_CondSignal(SDL_cond *);
 SDL_Thread *SDL_CreateThread(int (*)(void *), const char *, void *);
+void SDL_Delay(Uint32);

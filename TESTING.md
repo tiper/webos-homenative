@@ -22,8 +22,8 @@ mount keeps the old binary until a reboot).
 7. **Safety net.** Install a build that exits at once, then reboot: Home restarts four times, then
    LG's Home appears, `/var/lib/homenative/failed` holds the build's md5, and after another reboot
    the hook log says `this build failed`. Installing a good build clears it.
-8. **Watchdog.** `kill -STOP` then `-CONT` after 90 s: Home dies, SAM restarts it, the log kept in
-   `/tmp/homenative.log.prev` ends in the backtrace.
+8. **Watchdog.** `kill -STOP` then `-CONT` after 90 s: Home dies, SAM restarts it, and the log kept
+   in `/tmp/homenative.log.prev` ends in `fatal signal 14` with `pc` and `lr` lines.
 9. **Sleeping while hidden.** With an app in front, Home's voluntary context
    switches stay near 1 a second (about 100 before), and the log says `sleeping on the Wayland
    socket`, with no `stays readable` line. Home key response is unchanged.
@@ -31,6 +31,13 @@ mount keeps the old binary until a reboot).
     A US region shows `3:12 PM`.
 11. **A JPEG wallpaper** at `/var/lib/homenative/wallpaper.jpg` shows; a corrupt one falls back to
     the shipped picture.
+
+12. **Upgrade in place.** With Home Native running, run `install.sh` with a new build: `/proc/<pid>/exe`
+    of Home matches the installed file, with no reboot.
+13. **Restarting isn't crashing.** After a plain `kill` of Home, `/tmp/homenative-starts` is gone.
+14. **Panel off.** In standby, `kill -9` Home: the new one stays up past 90 s. If the first frame
+    blocked with the panel off, the watchdog would end it here.
+15. **Other scripts.** An app with a Japanese or Thai title shows real letters.
 
 The host test (`tests/host/run.sh [seeds] [frames]`) runs the real `src/home.c` against a fake TV
 under ASan and UBSan, with random keys and hostile service replies. It needs a C compiler and

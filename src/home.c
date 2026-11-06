@@ -74,9 +74,34 @@ static void logf_(const char *fmt, ...) {
 #define vlogf_(...) do { if (verbose) logf_(__VA_ARGS__); } while (0)
 /* A crash, or the watchdog's alarm: what was happening goes to the log (addresses only: the binary
  * is stripped, so use addr2line on an unstripped build), then the signal does what it would have */
-static void on_fatal(int sig) {
-    static const char m[] = "fatal signal; stack:\n";
-    if (write(STDERR_FILENO, m, sizeof m - 1) < 0) {}
+/* Where it stopped, from the registers the kernel saved, then the walk up from there. The walk
+ * can't cross into LG's libraries (they carry no unwind tables), and a hang is usually in one,
+ * so the registers are what names it. dladdr and backtrace take the loader's lock, which a fault
+ * inside the loader would already hold, so a fresh alarm ends the process if this hangs too. */
+static void fatal_where(const char *name, uintptr_t a) {
+    char m[128]; Dl_info d;
+    int n = snprintf(m, sizeof m, "%s %08lx", name, (unsigned long)a);
+    if (dladdr((void *)a, &d) && d.dli_fname)
+        n += snprintf(m + n, sizeof m - (size_t)n, " %s+%#lx", d.dli_fname, (unsigned long)(a - (uintptr_t)d.dli_fbase));
+    if (n > (int)sizeof m - 2) n = (int)sizeof m - 2;
+    m[n++] = '\n';
+    if (write(STDERR_FILENO, m, (size_t)n) < 0) {}
+}
+static void on_fatal(int sig, siginfo_t *si, void *uc) {
+    sigset_t alrm;
+    signal(SIGALRM, SIG_DFL);
+    sigemptyset(&alrm); sigaddset(&alrm, SIGALRM);
+    sigprocmask(SIG_UNBLOCK, &alrm, NULL);
+    alarm(3);
+    char m[64];
+    int n = snprintf(m, sizeof m, "fatal signal %d, address %p; stack:\n", sig, si->si_addr);
+    if (write(STDERR_FILENO, m, (size_t)n) < 0) {}
+#ifdef __arm__
+    const mcontext_t *c = &((ucontext_t *)uc)->uc_mcontext;
+    fatal_where("pc", c->arm_pc); fatal_where("lr", c->arm_lr);
+#else
+    (void)uc;
+#endif
     void *bt[32];
     backtrace_symbols_fd(bt, backtrace(bt, 32), STDERR_FILENO);
     signal(sig, SIG_DFL);
@@ -84,8 +109,12 @@ static void on_fatal(int sig) {
 }
 static void fatal_handlers(void) {
     void *warm[1]; backtrace(warm, 1); /* its first call loads libgcc: not something to do in a crash */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_fatal;
+    sa.sa_flags = SA_SIGINFO; /* blocked while it runs: a fault in here just ends the process */
     static const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGALRM};
-    for (unsigned i = 0; i < sizeof sigs / sizeof *sigs; i++) signal(sigs[i], on_fatal);
+    for (unsigned i = 0; i < sizeof sigs / sizeof *sigs; i++) sigaction(sigs[i], &sa, NULL);
 }
 static void scpy(char *d, size_t n, const char *s) { snprintf(d, n, "%s", s ? s : ""); }
 
@@ -737,6 +766,29 @@ static TTF_Font *font(int f) {
         open[bold][px] = TTF_OpenFont(bold ? "/usr/share/fonts/LG_Smart_UI-SemiBold.ttf" : "/usr/share/fonts/LG_Smart_UI-Regular.ttf", px);
     return open[bold][px];
 }
+/* LG's UI font is Latin, Greek and Cyrillic. A name in another script is drawn whole in the first
+ * of the TV's other fonts that has it. SDL_ttf neither shapes nor reorders, so Arabic and Hebrew
+ * show their letters, not joined up. */
+static TTF_Font *font_for(int f, const char *s) {
+    TTF_Font *base = font(f);
+    if (!base || !s) return base;
+    static const char *const files[] = {"/usr/share/fonts/LG_Smart_UI_JP.ttf", "/usr/share/fonts/LG_Smart_UI_AR_HE_TH-Regular.ttf", "/usr/share/fonts/DroidSansFallback.ttf"};
+    enum { NFILES = sizeof files / sizeof *files };
+    static TTF_Font *open[NFILES][128];
+    int px = f >= 1000 ? f - 1000 : f;
+    if (px <= 0 || px >= 128) px = 24;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p < 0xC0) continue;
+        unsigned cp = *p >= 0xF0 ? 0xFFFF : *p >= 0xE0 ? (*p & 15u) << 12 | (p[1] & 63u) << 6 | (p[1] ? p[2] & 63u : 0) : (*p & 31u) << 6 | (p[1] & 63u);
+        if (cp == 0xFFFF || TTF_GlyphIsProvided(base, (Uint16)cp)) continue;
+        for (int i = 0; i < NFILES; i++) {
+            if (!open[i][px]) open[i][px] = TTF_OpenFont(files[i], px);
+            if (open[i][px] && TTF_GlyphIsProvided(open[i][px], (Uint16)cp)) return open[i][px];
+        }
+        break;
+    }
+    return base;
+}
 /* LG's top buttons are glyphs of its "Sandstone Icons" font above U+FFFF, which SDL_ttf 2.0.14 (UCS-2)
  * cannot reach, so FreeType renders them directly */
 static Tex glyph_tex(unsigned cp, int px) {
@@ -805,7 +857,7 @@ static Tex text_cached(int f, int maxw, const char *s) {
     if (!s || !*s) { Tex z = {0, 0, 0}; return z; }
     char key[300]; snprintf(key, sizeof key, "T%d/%d:%s", f, maxw, s);
     const Tex *c = tcache_get(key);
-    return c ? *c : tcache_put(key, text_fit(font(f), s, maxw));
+    return c ? *c : tcache_put(key, text_fit(font_for(f, s), s, maxw));
 }
 
 static Item *row_add(Row *r) {
@@ -925,13 +977,10 @@ static bool on_reply(LSHandle *h, LSMessage *msg, void *ctx) {
     if (c->sub && !ok && !cJSON_IsTrue(cJSON_GetObjectItem(root, "subscribed"))) {
         /* the subscription ended (its service went down or restarted; Home outlives them all
          * in standby): subscribe again, waiting longer after each failure, up to a minute.
-         * A refusal will not change, so that one is left alone. */
+         * A refusal rarely changes, so that one is only tried again now and then. */
         LSCallCancel(ls, c->token, NULL);
-        if (refused(raw)) { logf_("  not retried"); call_free(c); }
-        else {
-            c->backoff = c->backoff ? (c->backoff * 2 > 60 ? 60 : c->backoff * 2) : 2;
-            g_timeout_add_seconds((guint)c->backoff, sub_retry, c);
-        }
+        c->backoff = refused(raw) ? 300 : c->backoff ? (c->backoff * 2 > 60 ? 60 : c->backoff * 2) : 2;
+        g_timeout_add_seconds((guint)c->backoff, sub_retry, c);
         cJSON_Delete(root);
         return true;
     }
@@ -964,7 +1013,7 @@ static void subscribe(const char *uri, const char *payload, json_cb cb) {
     if (!ls) return;
     Call *c = calloc(1, sizeof *c);
     c->cb = cb; c->sub = 1; scpy(c->uri, sizeof c->uri, uri); c->payload = strdup(payload);
-    if (!sub_start(c)) call_free(c);
+    if (!sub_start(c)) { c->backoff = 2; g_timeout_add_seconds(2, sub_retry, c); }
 }
 static int sub_start(Call *c) {
     LSError e; LSErrorInit(&e);
@@ -982,8 +1031,13 @@ static void luna_init(void) {
     LSError e; LSErrorInit(&e);
     /* Home's role grants its permissions to the name com.webos.app.home; an anonymous client of
      * that executable may only reach two video services. The dev app registers anonymously. */
-    if (!LSRegister(as_home ? "com.webos.app.home" : NULL, &ls, &e)) {
-        logf_("LSRegister: %s", e.message); LSErrorFree(&e); ls = NULL; return;
+    for (int tries = 0; !LSRegister(as_home ? "com.webos.app.home" : NULL, &ls, &e); tries++) {
+        logf_("LSRegister: %s", e.message); LSErrorFree(&e); ls = NULL;
+        if (!as_home) return;
+        /* the name may still be held by the instance that just died. Without the bus Home is
+         * an empty screen that looks alive: better a failed start, which the safety net counts */
+        if (tries == 20) { logf_("no bus: giving up"); _exit(1); }
+        SDL_Delay(500);
     }
     if (!LSGmainContextAttach(ls, g_main_context_default(), &e)) { logf_("LSGmainContextAttach: %s", e.message); LSErrorFree(&e); }
     logf_("luna registered");
@@ -1239,21 +1293,6 @@ static void hidden_set(const char *id, int on) {
     hidden_save();
     logf_("%s %s", on ? "hide" : "unhide", id);
 }
-/* Forget an app when it is uninstalled (else it would come back hidden if reinstalled): one the
- * row had and the new list does not. One merely missing from a list is left alone: at boot, or
- * with its USB drive out, an app can be away and still be wanted hidden when it returns. */
-static void hidden_prune(const Row *old, const Row *r) {
-    int kept = 0;
-    for (int i = 0; i < nhidden; i++) {
-        int found = 0, had = 0;
-        for (int k = 0; k < r->n && !found; k++) found = !strcmp(r->items[k].id, hidden_ids[i]);
-        for (int k = 0; k < old->n && !had; k++) had = !strcmp(old->items[k].id, hidden_ids[i]);
-        if (found || !had) hidden_ids[kept++] = hidden_ids[i];
-        else { logf_("hidden: %s is gone", hidden_ids[i]); free(hidden_ids[i]); }
-    }
-    if (kept != nhidden) { nhidden = kept; hidden_save(); }
-}
-
 static int edit_mode_moving(void);
 static void apps_fix_sel(void);
 enum { ED_OFF, ED_BROWSE, ED_MOVE, ED_TRASH, ED_CONFIRM, ED_HIDE }; /* ED_HIDE: the eye over a tile, ours */
@@ -1298,13 +1337,12 @@ static void on_launchpoints(cJSON *root, const char *raw) {
         it->hf = it->hidden; /* a new hidden app starts collapsed (row_merge keeps a known one's) */
     }
     logf_("apps: %d launch points", nw.n);
-    if (nw.n) hidden_prune(&rows[ROW_APPS], &nw);
     Row *ar = &rows[ROW_APPS];
     char was[200] = ""; if (ar->n) scpy(was, sizeof was, ar->items[ar->sel].id);
     row_merge(ar, &nw);
     apps_fix_sel();
-    /* the dialog asks about the focused app: if that changed under it, it no longer asks what it says */
-    if (edit_mode == ED_CONFIRM && (!ar->n || strcmp(was, ar->items[ar->sel].id))) edit_mode = ED_BROWSE;
+    /* the trash, the eye and the dialog are about the focused app: if that changed under them, they no longer are */
+    if (edit_mode >= ED_TRASH && (!ar->n || strcmp(was, ar->items[ar->sel].id))) edit_mode = ED_BROWSE;
     build_dash();
 }
 
@@ -1372,6 +1410,7 @@ static void build_pills(void) {
 
 static void on_channel_mode(cJSON *root, const char *raw) {
     (void)raw;
+    if (!cJSON_IsTrue(cJSON_GetObjectItem(root, "returnValue"))) return;
     const char *m = jstr(cJSON_GetObjectItem(root, "channelMode"), "channelModeName");
     scpy(channel_mode, sizeof channel_mode, m);
     build_dash();
@@ -1379,6 +1418,7 @@ static void on_channel_mode(cJSON *root, const char *raw) {
 
 static void on_airplay(cJSON *root, const char *raw) {
     (void)raw;
+    if (!cJSON_IsTrue(cJSON_GetObjectItem(root, "returnValue"))) return;
     airplay_on = cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(root, "settings"), "supportAirplay"));
     build_dash();
 }
@@ -1711,12 +1751,13 @@ static void start_subscriptions(void) {
 }
 /* Coming back to the front re-reads what changes while away (clock, the channel ranking and the
  * programmes on now). The big, slow-changing list (iepg's channel list, ~67 KB) is parsed on
- * this thread, so it is read at most every 30 min. */
+ * this thread, so it is read at most every 30 min, or until one read has worked: services
+ * can still be starting when Home does. */
 static double last_full_refresh = -1e12;
 static void refresh(void) {
     call("luna://com.palm.systemservice/time/getSystemTime", "{}", on_time);
     events_requested = 0;
-    if (now_ms() - last_full_refresh > 30 * 60 * 1000.0) {
+    if (now_ms() - last_full_refresh > 30 * 60 * 1000.0 || nchnames < 0 || !channel_mode[0]) {
         last_full_refresh = now_ms();
         call("luna://com.webos.service.utp.channel/getChannelMode", "{}", on_channel_mode);
         call("luna://com.webos.settingsservice/getSystemSettings", "{\"key\":\"supportAirplay\",\"category\":\"other\"}", on_airplay);
@@ -1957,6 +1998,7 @@ static void layout_rows(void) {
         rows[ri].y = y;
         if (row_live(&rows[ri])) y += row_pitch(ri);
     }
+    while (cur_row > ROW_APPS && cur_row <= LAST_PAGE_ROW && !row_live(&rows[cur_row])) cur_row--; /* the row left from under the focus */
     if (cur_row <= ROW_APPS) page_target = 0;
     else page_target = DASH_PAGE + fmaxf(0, rows[cur_row].y + row_h(&rows[cur_row]) - DASH_PAGE - 1040);
 }
@@ -2115,6 +2157,10 @@ static int update(float dt) {
         /* once a minute: the programmes' progress moves on, and a programme may have ended.
          * Not while hidden (standby can last weeks): coming back to the front refreshes them. */
         if (rank_failed && on_screen) request_rank();
+        if (nchnames < 0 && on_screen) refresh();
+        /* the system may not push a daylight-saving change, which leaves the UTC clock alone */
+        static int asked_hour = -1;
+        if (tm.tm_min == 0 && tm.tm_hour != asked_hour) { asked_hour = tm.tm_hour; call("luna://com.palm.systemservice/time/getSystemTime", "{}", on_time); }
         if (nchans && on_screen) { build_channels(); if (tm.tm_min % 5 == 0) request_events(); }
         moving = 1;
     }
@@ -2559,9 +2605,8 @@ static int edit_mode_moving(void) { return edit_mode == ED_MOVE; }
 static void edit_drop(void) {
     if (edit_mode != ED_MOVE) return;
     edit_mode = ED_BROWSE;
-    if (lp_stale) { lp_stale = 0; call("luna://com.webos.applicationManager/listLaunchPoints", "{}", on_launchpoints); }
     Row *r = &rows[ROW_APPS];
-    if (!r->n || r->sel == move_from) return;
+    if (r->n && r->sel != move_from) {
     Item *it = &r->items[r->sel];
     /* SAM's position counts our own launch point, which the row leaves out */
     int pos = 0;
@@ -2570,6 +2615,9 @@ static void edit_drop(void) {
     char p[300]; snprintf(p, sizeof p, "{\"launchPointId\":\"%s\",\"position\":%d}", it->lpid, pos);
     logf_("move %s", p);
     call("luna://com.webos.applicationManager/moveLaunchPoint", p, on_moved);
+    }
+    /* after the move, or the reply would carry the old order */
+    if (lp_stale) { lp_stale = 0; call("luna://com.webos.applicationManager/listLaunchPoints", "{}", on_launchpoints); }
 }
 
 static void edit_exit(void) { edit_drop(); edit_mode = ED_OFF; apps_fix_sel(); }
@@ -2588,6 +2636,9 @@ static void on_removed(cJSON *root, const char *raw) {
 static void edit_delete(void) {
     Row *r = &rows[ROW_APPS];
     if (!r->n) return;
+    /* forgotten only here, so it doesn't come back hidden if reinstalled. An app merely missing
+     * from a list (a USB drive out, a service restarting) is still wanted hidden when it returns */
+    hidden_set(r->items[r->sel].id, 0);
     Item *it = &r->items[r->sel];
     /* LG deletes through SAM's removeLaunchPoint (LaunchPointInterfaces.qml); for an app's
      * default launch point that uninstalls it. The row closes up when SAM pushes the change. */
@@ -2786,7 +2837,7 @@ static void ok_poll(void) {
     if (edit_mode || recents_open) return;
     int ri = cur_row, i = rows[cur_row].sel;
     if (ok_is_click && !pointer_hit(ok_x, ok_y, &ri, &i)) return;
-    if (ri != ROW_APPS) return;
+    if (ri != ROW_APPS || !rows[ri].n) return;
     cur_row = ri; rows[ri].sel = i;
     edit_mode = ED_MOVE; move_from = i; /* a long press picks the tile straight up, as on LG's */
     logf_("edit: moving %s", rows[ri].items[i].id);
@@ -2925,13 +2976,14 @@ static void dev_commands(void) {
  * shell. Each start as Home is counted in /tmp (a reboot starts over); a run past STABLE_MS clears
  * the count. Reaching START_LIMIT means it keeps dying, so it steps aside: the bind mounts go, and
  * this process becomes LG's Home in place. FAILED_PATH, holding the binary's md5, keeps the boot
- * hook from mounting that same build again; a new build gets a new chance. A hang gets no such
+ * hook from mounting that same build again; a new build gets a new chance. A clean exit (a plain
+ * kill arrives as SDL_QUIT) clears the count too: only dying counts. A hang gets no such
  * luck by itself, hence the watchdog: the main loop re-arms an alarm, and if it stops doing so
  * for WATCHDOG_S the process dies and SAM restarts it, which counts as a start like any other. */
 #define STARTS_PATH "/tmp/homenative-starts"
 #define FAILED_PATH "/var/lib/homenative/failed"
 #define START_LIMIT 4
-#define STABLE_MS 60000.0
+#define STABLE_MS 600000.0
 #define WATCHDOG_S 90
 #define HOME_BIN "/usr/bin/com.webos.app.home"
 #define HOME_CKPT "/mnt/lg/cmn_data/checkpoint/com.webos.app.home"
@@ -2948,9 +3000,12 @@ static void safety_check(char **argv) {
     logf_("safety: %d starts with no stable run: stepping aside for LG's Home", n);
     remove(STARTS_PATH);
     mkdir("/var/lib/homenative", 0755);
-    /* the same lifting of the mounts as scripts/restore.sh */
-    if (system("md5sum < " DEV_DIR "/homenative > " FAILED_PATH "; umount -l " HOME_BIN "; "
-               "while grep ' " HOME_CKPT " ' /proc/mounts | tail -1 | grep -q '^tmpfs'; do umount -l " HOME_CKPT " || break; done")) {}
+    /* the md5 of what is running, which an upgrade may already have replaced on disk; then the
+     * same lifting of the mounts as scripts/restore.sh */
+    char sh[400];
+    snprintf(sh, sizeof sh, "md5sum < /proc/%d/exe > " FAILED_PATH "; umount -l " HOME_BIN "; "
+             "while grep ' " HOME_CKPT " ' /proc/mounts | tail -1 | grep -q '^tmpfs'; do umount -l " HOME_CKPT " || break; done", (int)getpid());
+    if (system(sh)) {}
     execv(HOME_BIN, argv);
     logf_("safety: cannot start LG's Home: %s", strerror(errno));
 }
@@ -2973,7 +3028,14 @@ static guint wake_timer, wl_source;
 static gboolean wake_up(gpointer unused) { (void)unused; wake_timer = 0; return G_SOURCE_REMOVE; }
 static gboolean on_wayland(gint fd, GIOCondition c, gpointer unused) {
     (void)fd; (void)unused;
-    if (c & (G_IO_HUP | G_IO_ERR)) { wl_source = 0; return G_SOURCE_REMOVE; }
+    if (c & (G_IO_HUP | G_IO_ERR)) {
+        /* the compositor went away: a window never comes back on this connection, and SAM
+         * restarts Home. The dev app just stops listening. */
+        logf_("Wayland connection lost");
+        if (as_home) _exit(1);
+        wl_source = 0;
+        return G_SOURCE_REMOVE;
+    }
     return G_SOURCE_CONTINUE;
 }
 static void watch_wayland(SDL_Window *win) {
@@ -3130,6 +3192,8 @@ int main(int argc, char **argv) {
                 SDL_Keycode k = ev.key.keysym.sym;
                 last_input_ms = now_ms();
                 hint_input();
+                /* blue only ever sends one press: it counts even when it is the one that wakes Home */
+                if (ev.key.keysym.scancode == SCAN_BLUE && !ev.key.repeat) blue_press();
                 /* dimmed: the first key only wakes Home */
                 if (dim_f > 0.3f) { dirty = 1; break; }
                 if (k == SDLK_LEFT) move(-1, 0);
@@ -3138,7 +3202,7 @@ int main(int argc, char **argv) {
                 else if (k == SDLK_DOWN) move(0, 1);
                 else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) { if (!ev.key.repeat) ok_press(0, 0, 0); }
                 else if (is_back(&ev)) back_short();
-                else if (ev.key.keysym.scancode == SCAN_BLUE) { if (!ev.key.repeat) blue_press(); }
+                else if (ev.key.keysym.scancode == SCAN_BLUE) {}
                 else logf_("key sym=%d scan=%d", k, ev.key.keysym.scancode);
                 dirty = 1; break;
             }
@@ -3206,6 +3270,7 @@ int main(int argc, char **argv) {
         } else rendered_last = 0;
     }
     logf_("exit");
+    if (as_home) remove(STARTS_PATH);
     SDL_GL_DeleteContext(gl); SDL_DestroyWindow(win); SDL_Quit();
     return 0;
 }

@@ -69,8 +69,8 @@ It's built for TVs that stay in Quick Start+ standby for weeks:
 - A computer on the same network to copy the files over.
 
 UI text comes in English, Portuguese, Spanish, French, German and Italian, picked from the TV's
-language. App, input and channel names come from the TV itself. Names in scripts the UI font
-doesn't cover (Japanese, Arabic and so on) may not draw properly yet.
+language. App, input and channel names come from the TV itself, in its fonts. Arabic and Hebrew
+names show their letters, but not joined up or right to left.
 
 ## Install
 
@@ -78,8 +78,8 @@ doesn't cover (Japanese, Arabic and so on) may not draw properly yet.
 2. Copy it to the TV and unpack it:
 
    ```bash
-   scp -O homenative-0.1.0.tar.gz root@<tv-ip>:/tmp/
-   ssh root@<tv-ip> 'cd /tmp && tar xzf homenative-0.1.0.tar.gz'
+   scp -O homenative-0.2.0.tar.gz root@<tv-ip>:/tmp/
+   ssh root@<tv-ip> 'cd /tmp && tar xzf homenative-0.2.0.tar.gz'
    ```
 
    `-O` makes `scp` use its classic protocol: the TV's SSH server (Dropbear) has no SFTP, which
@@ -88,8 +88,11 @@ doesn't cover (Japanese, Arabic and so on) may not draw properly yet.
 3. Install the app and its boot hook, then reboot:
 
    ```bash
-   ssh root@<tv-ip> 'sh /tmp/homenative-0.1.0/install.sh && reboot'
+   ssh root@<tv-ip> 'sh /tmp/homenative-0.2.0/install.sh && reboot'
    ```
+
+   To upgrade later, run `install.sh` the same way, without the reboot. It switches to the new
+   build in place.
 
 From then on Home Native is the TV's Home. It's on screen about 45 seconds after a cold boot,
 and the Home key opens it instantly. Nothing on the TV's read-only system partition is changed.
@@ -121,8 +124,8 @@ to go back to the built-in one.
   delete the file and reboot to return.
 - **LG's Home right now, without rebooting:** `sh /var/lib/homenative/restore.sh`. A reboot
   brings Home Native back.
-- **Remove it completely:** `sh /var/lib/homenative/uninstall.sh`, then reboot. This removes
-  the app, the boot hook and `/var/lib/homenative`, including your hidden list and wallpaper.
+- **Remove it completely:** `sh /var/lib/homenative/uninstall.sh`. LG's Home comes back, and
+  this removes the app, the boot hook and `/var/lib/homenative`, including your hidden list and wallpaper.
 
 The installer copies `restore.sh` and `uninstall.sh` to `/var/lib/homenative/`, because the
 TV empties `/tmp` at every boot.
@@ -140,7 +143,7 @@ Homebrew Channel's `init.d`, about 40 seconds after boot. It:
 The changes are mounts made at boot, so a reboot without the hook undoes them completely.
 
 Home Native is the only Home on the TV while it runs, so it looks after itself. If it starts four
-times in a row without surviving a minute, it lifts its mounts and becomes LG's Home in the same
+times in a row, each lasting under ten minutes, without being told to quit, it lifts its mounts and becomes LG's Home in the same
 process, and the hook won't mount that build again until a different one is installed. A watchdog
 kills it if the main loop stops for 90 seconds, which counts as one of those starts. The previous
 log is kept at `/tmp/homenative.log.prev`, with a backtrace if it crashed.

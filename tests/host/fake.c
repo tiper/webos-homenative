@@ -53,6 +53,7 @@ void glScissor(GLint a, GLint b, GLsizei c, GLsizei d) { (void)a; (void)b; (void
 const GLubyte *glGetString(GLenum a) { (void)a; return (const GLubyte *)"fake"; } void glFinish(void) {} GLenum glGetError(void) { return GL_NO_ERROR; }
 
 /* ---------- text and images ---------- */
+int TTF_GlyphIsProvided(TTF_Font *f, Uint16 c) { (void)f; return c % 7 != 0; }
 TTF_Font *TTF_OpenFont(const char *p, int s) { (void)p; (void)s; return (TTF_Font *)1; } int TTF_Init(void) { return 0; } const char *TTF_GetError(void) { return ""; }
 int TTF_SizeUTF8(TTF_Font *f, const char *s, int *w, int *h) { (void)f; *w = (int)strlen(s) * 12; *h = 28; return 0; }
 SDL_Surface *TTF_RenderUTF8_Blended(TTF_Font *f, const char *s, SDL_Color c) { (void)f; (void)c; int w = (int)strlen(s) * 12; return SDL_CreateRGBSurfaceWithFormat(0, w > 0 ? w : 1, 28, 32, SDL_PIXELFORMAT_ARGB8888); }
@@ -111,6 +112,7 @@ SDL_Thread *SDL_CreateThread(int (*fn)(void *), const char *n, void *arg) { (voi
 
 /* ---------- remote ---------- */
 guint fake_timeout(guint ms, GSourceFunc cb, gpointer p) { clock_us += (Uint64)ms * 1000; return g_idle_add(cb, p); }
+void SDL_Delay(Uint32 ms) { clock_us += (Uint64)ms * 1000; }
 void SDL_GetVersion(SDL_version *v) { v->major = 2; v->minor = 0; v->patch = 10; }
 SDL_bool SDL_GetWindowWMInfo(SDL_Window *w, SDL_SysWMinfo *i) { (void)w; (void)i; return SDL_FALSE; }
 static void luna_tick(void);
