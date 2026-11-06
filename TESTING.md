@@ -22,8 +22,9 @@ mount keeps the old binary until a reboot).
 7. **Safety net.** Install a build that exits at once, then reboot: Home restarts four times, then
    LG's Home appears, `/var/lib/homenative/failed` holds the build's md5, and after another reboot
    the hook log says `this build failed`. Installing a good build clears it.
-8. **Watchdog.** `kill -STOP` then `-CONT` after 90 s: Home dies, SAM restarts it, and the log kept
-   in `/tmp/homenative.log.prev` ends in `fatal signal 14` with `pc` and `lr` lines.
+8. **Watchdog.** `kill -STOP` then `-CONT` after 90 s: Home dies, and its log ends in `fatal signal 14` with
+   `pc` and `lr` lines from the main thread. SAM restarts it with the TV on, and the log moves to
+   `/tmp/homenative.log.prev`. In standby SAM doesn't, and Home starts on the next wake.
 9. **Sleeping while hidden.** With an app in front, Home's voluntary context
    switches stay near 1 a second (about 100 before), and the log says `sleeping on the Wayland
    socket`, with no `stays readable` line. Home key response is unchanged.

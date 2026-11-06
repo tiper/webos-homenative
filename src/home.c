@@ -26,6 +26,7 @@
 #include <luna-service2/lunaservice.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <pthread.h>
 #include <execinfo.h>
 #include <limits.h>
 #include <math.h>
@@ -87,7 +88,10 @@ static void fatal_where(const char *name, uintptr_t a) {
     m[n++] = '\n';
     if (write(STDERR_FILENO, m, (size_t)n) < 0) {}
 }
+static pthread_t main_thread;
 static void on_fatal(int sig, siginfo_t *si, void *uc) {
+    /* the alarm can land on any thread, such as one of Mali's; the hang is the main one's */
+    if (sig == SIGALRM && !pthread_equal(pthread_self(), main_thread)) { pthread_kill(main_thread, sig); return; }
     sigset_t alrm;
     signal(SIGALRM, SIG_DFL);
     sigemptyset(&alrm); sigaddset(&alrm, SIGALRM);
@@ -108,6 +112,7 @@ static void on_fatal(int sig, siginfo_t *si, void *uc) {
     raise(sig);
 }
 static void fatal_handlers(void) {
+    main_thread = pthread_self();
     void *warm[1]; backtrace(warm, 1); /* its first call loads libgcc: not something to do in a crash */
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
