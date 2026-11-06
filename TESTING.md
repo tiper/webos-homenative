@@ -36,11 +36,12 @@ mount keeps the old binary until a reboot).
 12. **Upgrade in place.** With Home Native running, run `install.sh` with a new build: `/proc/<pid>/exe`
     of Home matches the installed file, with no reboot.
 13. **Restarting isn't crashing.** After a plain `kill` of Home, `/tmp/homenative-starts` is gone.
-14. **Panel off.** In standby, `kill -9` Home: the new one stays up past 90 s. If the first frame
-    blocked with the panel off, the watchdog would end it here.
-15. **Home comes back.** In standby, `kill -9` Home: about a minute later it is running again, and
-    with Live TV on, a `kill -9` of Home never leaves Live TV covered. `/tmp/homenative-hook.log`
-    says `preloading`.
+14. **Panel off.** Start Home while the panel is off and the CPU is still running, before Suspend:
+    it stays up past 90 s. If the first frame blocked with the panel off, the watchdog would end it
+    here. In Suspend the CPU stops, so nothing can be started or killed there.
+15. **Home comes back.** `kill -9` Home with Live TV on: about a minute later it is running again
+    and Live TV is not left covered. `kill -9` Home and power the TV off within a second: within a
+    minute of waking it is running again. `/tmp/homenative-hook.log` says `preloading` both times.
 16. **Other scripts.** An app with a Japanese or Thai title shows real letters.
 
 The host test (`tests/host/run.sh [seeds] [frames]`) runs the real `src/home.c` against a fake TV
