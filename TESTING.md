@@ -19,6 +19,34 @@ mount keeps the old binary until a reboot).
 6. **Memory.** `scripts/dev/memcheck.sh` and `scripts/dev/memopen.sh`, as before (Home about 12 MB
    proportional set size when open).
 
+7. **Safety net.** Install a build that exits at once, then reboot: Home restarts four times, then
+   LG's Home appears, `/var/lib/homenative/failed` holds the build's md5, and after another reboot
+   the hook log says `this build failed`. Installing a good build clears it.
+8. **Watchdog.** `kill -STOP` then `-CONT` after 90 s: Home dies, its log ends in `fatal signal 14` with
+   `pc` and `lr` lines and the main thread's stack, and the hook's watcher restarts it within about
+   a minute. The log moves to `/tmp/homenative.log.prev`.
+9. **Sleeping while hidden.** With an app in front, Home's voluntary context
+   switches stay near 1 a second (about 100 before), and the log says `sleeping on the Wayland
+   socket`, with no `stays readable` line. Home key response is unchanged.
+10. **Languages and clock.** Change the TV's language: pills and headings follow without a restart.
+    A US region shows `3:12 PM`.
+11. **A JPEG wallpaper** at `/var/lib/homenative/wallpaper.jpg` shows; a corrupt one falls back to
+    the shipped picture.
+
+12. **Upgrade in place.** With Home Native running, run `install.sh` with a new build: `/proc/<pid>/exe`
+    of Home matches the installed file, with no reboot.
+13. **Restarting isn't crashing.** After a plain `kill` of Home, `/tmp/homenative-starts` is gone.
+14. **Panel off.** In standby, `kill -9` Home: the new one stays up past 90 s. If the first frame
+    blocked with the panel off, the watchdog would end it here.
+15. **Home comes back.** In standby, `kill -9` Home: about a minute later it is running again, and
+    with Live TV on, a `kill -9` of Home never leaves Live TV covered. `/tmp/homenative-hook.log`
+    says `preloading`.
+16. **Other scripts.** An app with a Japanese or Thai title shows real letters.
+
+The host test (`tests/host/run.sh [seeds] [frames]`) runs the real `src/home.c` against a fake TV
+under ASan and UBSan, with random keys and hostile service replies. It needs a C compiler and
+GLib, not a TV, and CI runs it.
+
 Not known yet: whether the GL context survives every standby cycle (all textures would be lost
 and Home would draw black). If that ever happens, Home needs to recreate its textures on
 `SDL_RENDER_DEVICE_RESET` / context loss.

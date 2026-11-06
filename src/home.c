@@ -17,12 +17,20 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_ttf.h>
+/* (the NDK's SDL was built without Wayland; LG's on the TV has it) */
+#define SDL_VIDEO_DRIVER_WAYLAND
+#include <SDL2/SDL_syswm.h>
 #include <GLES2/gl2.h>
 #include <glib.h>
+#include <glib-unix.h>
 #include <luna-service2/lunaservice.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <pthread.h>
+#include <execinfo.h>
 #include <limits.h>
 #include <math.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +61,7 @@ static double now_ms(void) { return (double)(SDL_GetPerformanceCounter() - t0) *
 /* the dev app runs as an app user, who cannot write Home's (root's) log: it keeps its own */
 #define DEV_LOG_PATH "/tmp/homenative-dev.log"
 #define LOG_MAX (512 * 1024)
+#define LOG_PREV LOG_PATH ".prev" /* the run before this one: what a crash leaves behind */
 static const char *log_path = LOG_PATH;
 static int verbose = 1;
 static void logf_(const char *fmt, ...) {
@@ -64,6 +73,54 @@ static void logf_(const char *fmt, ...) {
     va_end(ap);
 }
 #define vlogf_(...) do { if (verbose) logf_(__VA_ARGS__); } while (0)
+/* A crash, or the watchdog's alarm: what was happening goes to the log (addresses only: the binary
+ * is stripped, so use addr2line on an unstripped build), then the signal does what it would have */
+/* Where it stopped, from the registers the kernel saved, then the walk up from there. The walk
+ * can't cross into LG's libraries (they carry no unwind tables), and a hang is usually in one,
+ * so the registers are what names it. dladdr and backtrace take the loader's lock, which a fault
+ * inside the loader would already hold, so a fresh alarm ends the process if this hangs too. */
+static void fatal_where(const char *name, uintptr_t a) {
+    char m[128]; Dl_info d;
+    int n = snprintf(m, sizeof m, "%s %08lx", name, (unsigned long)a);
+    if (dladdr((void *)a, &d) && d.dli_fname)
+        n += snprintf(m + n, sizeof m - (size_t)n, " %s+%#lx", d.dli_fname, (unsigned long)(a - (uintptr_t)d.dli_fbase));
+    if (n > (int)sizeof m - 2) n = (int)sizeof m - 2;
+    m[n++] = '\n';
+    if (write(STDERR_FILENO, m, (size_t)n) < 0) {}
+}
+static pthread_t main_thread;
+static void on_fatal(int sig, siginfo_t *si, void *uc) {
+    /* the alarm can land on any thread, such as one of Mali's; the hang is the main one's */
+    if (sig == SIGALRM && !pthread_equal(pthread_self(), main_thread)) { pthread_kill(main_thread, sig); return; }
+    sigset_t alrm;
+    signal(SIGALRM, SIG_DFL);
+    sigemptyset(&alrm); sigaddset(&alrm, SIGALRM);
+    sigprocmask(SIG_UNBLOCK, &alrm, NULL);
+    alarm(3);
+    char m[64];
+    int n = snprintf(m, sizeof m, "fatal signal %d, address %p; stack:\n", sig, si->si_addr);
+    if (write(STDERR_FILENO, m, (size_t)n) < 0) {}
+#ifdef __arm__
+    const mcontext_t *c = &((ucontext_t *)uc)->uc_mcontext;
+    fatal_where("pc", c->arm_pc); fatal_where("lr", c->arm_lr);
+#else
+    (void)uc;
+#endif
+    void *bt[32];
+    backtrace_symbols_fd(bt, backtrace(bt, 32), STDERR_FILENO);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+static void fatal_handlers(void) {
+    main_thread = pthread_self();
+    void *warm[1]; backtrace(warm, 1); /* its first call loads libgcc: not something to do in a crash */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_fatal;
+    sa.sa_flags = SA_SIGINFO; /* blocked while it runs: a fault in here just ends the process */
+    static const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGALRM};
+    for (unsigned i = 0; i < sizeof sigs / sizeof *sigs; i++) sigaction(sigs[i], &sa, NULL);
+}
 static void scpy(char *d, size_t n, const char *s) { snprintf(d, n, "%s", s ? s : ""); }
 
 /* ---------- GL ---------- */
@@ -264,6 +321,50 @@ static SDL_Surface *decode_png(const char *path) {
     return c;
 }
 
+/* src scaled and centre-cropped to fill w x h, as a new surface; src is freed. Averages a block of
+ * source pixels for each one when shrinking, interpolates when not. On the decoder thread: the
+ * TV's memory should not depend on the size of a picture someone chose. */
+static SDL_Surface *fit(SDL_Surface *src, int w, int h) {
+    if (src->w == w && src->h == h) return src;
+    SDL_Surface *d = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ABGR8888);
+    if (!d) return src;
+    double ca = (double)w / h, cw = src->w, ch = src->h;
+    if (cw / ch > ca) cw = ch * ca; else ch = cw / ca;
+    double sx = cw / w, sy = ch / h, ox = (src->w - cw) * 0.5, oy = (src->h - ch) * 0.5;
+    int fx = sx >= 2 ? (int)sx : 1, fy = sy >= 2 ? (int)sy : 1;
+    const unsigned char *in = src->pixels;
+    for (int y = 0; y < h; y++) {
+        unsigned char *o = (unsigned char *)d->pixels + (size_t)y * d->pitch;
+        double py = oy + y * sy;
+        int y0 = (int)py, y1 = y0 + 1 < src->h ? y0 + 1 : y0;
+        if (y0 >= src->h) y0 = y1 = src->h - 1;
+        int wy = (int)((py - y0) * 256);
+        for (int x = 0; x < w; x++, o += 4) {
+            double px = ox + x * sx;
+            int x0 = (int)px, x1 = x0 + 1 < src->w ? x0 + 1 : x0;
+            if (x0 >= src->w) x0 = x1 = src->w - 1;
+            if (fx > 1 || fy > 1) {
+                unsigned sum[3] = {0, 0, 0}, n = 0;
+                for (int yy = y0; yy < y0 + fy && yy < src->h; yy++) {
+                    const unsigned char *q = in + (size_t)yy * src->pitch + (size_t)x0 * 4;
+                    for (int xx = 0; xx < fx && x0 + xx < src->w; xx++, q += 4, n++) { sum[0] += q[0]; sum[1] += q[1]; sum[2] += q[2]; }
+                }
+                for (int c = 0; c < 3; c++) o[c] = (unsigned char)(sum[c] / n);
+            } else {
+                int wx = (int)((px - x0) * 256);
+                const unsigned char *a = in + (size_t)y0 * src->pitch, *b = in + (size_t)y1 * src->pitch;
+                for (int c = 0; c < 3; c++) {
+                    int top = a[x0 * 4 + c] * (256 - wx) + a[x1 * 4 + c] * wx, bot = b[x0 * 4 + c] * (256 - wx) + b[x1 * 4 + c] * wx;
+                    o[c] = (unsigned char)((top * (256 - wy) + bot * wy) >> 16);
+                }
+            }
+            o[3] = 255;
+        }
+    }
+    SDL_FreeSurface(src);
+    return d;
+}
+
 /* The wallpaper carries its own scrims (darker top for the clock, darker bottom for the rows),
  * baked into the pixels once at load: drawing them as full-screen blended quads every frame
  * is what kept the Mali-G51 at ~50 fps. */
@@ -341,18 +442,23 @@ static TTF_Font *f_clock, *f_date;
 static Tex text_fit(TTF_Font *f, const char *s, int maxw) {
     Tex t = {0, 0, 0};
     if (!f || !s || !*s) return t;
-    char buf[256]; scpy(buf, sizeof buf, s);
+    char buf[256 + 4]; scpy(buf, 256, s);
     int w = 0, h = 0;
     TTF_SizeUTF8(f, buf, &w, &h);
     if (maxw > 0 && w > maxw) {
-        size_t n = strlen(buf);
-        while (n > 0) {
-            do n--; while (n > 0 && ((unsigned char)buf[n] & 0xC0) == 0x80); /* step back one UTF-8 char */
-            while (n > 0 && buf[n - 1] == ' ') n--;
-            memcpy(buf + n, "\xE2\x80\xA6", 4); /* … */
+        char full[256]; scpy(full, sizeof full, s);
+        /* the longest start that fits with its ellipsis: lo bytes do, hi do not */
+        size_t lo = 0, hi = strlen(full);
+        while (hi - lo > 1) {
+            size_t m = (lo + hi) / 2;
+            while (m > lo + 1 && ((unsigned char)full[m] & 0xC0) == 0x80) m--; /* a whole UTF-8 char */
+            memcpy(buf, full, m); memcpy(buf + m, "\xE2\x80\xA6", 4); /* … */
             TTF_SizeUTF8(f, buf, &w, &h);
-            if (w <= maxw) break;
+            if (w <= maxw) lo = m; else hi = m;
         }
+        while (lo > 0 && ((unsigned char)full[lo] & 0xC0) == 0x80) lo--;
+        while (lo > 0 && full[lo - 1] == ' ') lo--;
+        memcpy(buf, full, lo); memcpy(buf + lo, "\xE2\x80\xA6", 4);
     }
     SDL_Color white = {255, 255, 255, 255};
     SDL_Surface *surf = TTF_RenderUTF8_Blended(f, buf, white);
@@ -372,23 +478,59 @@ static void draw_text(const Tex *t, float x, float y, Col c, int shadow) {
  * system and are already localized. */
 
 static char ui_lang[8] = "en";
+static int hour12; /* the clock: 3:12 PM rather than 15:12 */
 
 enum { S_MOBILE, S_TVIN, S_GUIDE, S_CHANNELS, S_CHLIST, S_CHLIST_SUB, S_NOINFO, S_EDIT_HINT,
        S_CABLE, S_ANTENNA, S_SATELLITE, S_LIVETV, S_BROWSE_HINT, S_DELETE_Q, S_DELETE, S_CANCEL,
-       S_RECENTS, S_CLOSE_ALL, S_FIRST_HINT, NSTR };
+       S_RECENTS, S_CLOSE_ALL, S_FIRST_HINT, S_NO_RECENTS, S_CANT_OPEN, NSTR };
 static const char *const str_en[NSTR] = {
     "Mobile", "TV / Inputs", "Connection Guide", "Frequently Watched Channels", "View channel list",
     "You can browse all channels", "No information", "Use the arrows to move    OK to put down",
     "Cable", "Antenna", "Satellite", "Live TV",
     "OK to move    Up to hide or delete    Back when done", "Delete \xe2\x80\x9c%s\xe2\x80\x9d?", "Delete", "Cancel",
-    "Recents", "Close All", "Hold OK on an app to edit    Hold blue for the screen saver"};
+    "Recents", "Close All", "Hold OK on an app to edit    Hold blue for the screen saver",
+    "No recent apps", "Couldn't open %s"};
 static const char *const str_pt[NSTR] = {
     "Telem\xc3\xb3vel", "TV / Entradas", "Guia de Liga\xc3\xa7\xc3\xa3o", "Canais Vistos Frequentemente",
     "Ver lista de canais", "Pode explorar todos os canais", "Sem informa\xc3\xa7\xc3\xa3o",
     "Use as setas para mover    OK para pousar", "Cabo", "Antena", "Sat\xc3\xa9lite", "Live TV",
     "OK para mover    Cima para ocultar ou eliminar    Voltar para terminar", "Eliminar \xe2\x80\x9c%s\xe2\x80\x9d?", "Eliminar", "Cancelar",
-    "Listas Recentes", "Fechar Tudo", "Mantenha OK numa app para editar    Mantenha o azul para a prote\xc3\xa7\xc3\xa3o de ecr\xc3\xa3"};
-static const char *S(int k) { return !strcmp(ui_lang, "pt") ? str_pt[k] : str_en[k]; }
+    "Listas Recentes", "Fechar Tudo", "Mantenha OK numa app para editar    Mantenha o azul para a prote\xc3\xa7\xc3\xa3o de ecr\xc3\xa3",
+    "Sem aplica\xc3\xa7\xc3\xb5" "es recentes", "N\xc3\xa3o foi poss\xc3\xadvel abrir %s"};
+static const char *const str_es[NSTR] = {
+    "M\xc3\xb3vil", "TV / Entradas", "Gu\xc3\xad" "a de conexi\xc3\xb3n", "Canales m\xc3\xa1s vistos",
+    "Ver lista de canales", "Explora todos los canales", "Sin informaci\xc3\xb3n",
+    "Usa las flechas para mover    OK para soltar", "Cable", "Antena", "Sat\xc3\xa9lite", "TV en directo",
+    "OK para mover    Arriba para ocultar o eliminar    Atr\xc3\xa1s para terminar", "\xc2\xbf" "Eliminar \xe2\x80\x9c%s\xe2\x80\x9d?", "Eliminar", "Cancelar",
+    "Recientes", "Cerrar todo", "Mant\xc3\xa9n OK en una app para editar    Mant\xc3\xa9n azul para el salvapantallas",
+    "No hay aplicaciones recientes", "No se pudo abrir %s"};
+static const char *const str_fr[NSTR] = {
+    "Mobile", "TV / Entr\xc3\xa9" "es", "Guide de connexion", "Cha\xc3\xaennes les plus regard\xc3\xa9" "es",
+    "Voir la liste des cha\xc3\xaennes", "Parcourez toutes les cha\xc3\xaennes", "Aucune information",
+    "Fl\xc3\xa8" "ches pour d\xc3\xa9placer    OK pour poser", "C\xc3\xa2" "ble", "Antenne", "Satellite", "TV en direct",
+    "OK pour d\xc3\xa9placer    Haut pour masquer ou supprimer    Retour pour terminer", "Supprimer \xe2\x80\x9c%s\xe2\x80\x9d ?", "Supprimer", "Annuler",
+    "R\xc3\xa9" "cents", "Tout fermer", "Maintenez OK sur une app pour modifier    Maintenez bleu pour l\xe2\x80\x99\xc3\xa9" "conomiseur",
+    "Aucune application r\xc3\xa9" "cente", "Impossible d\xe2\x80\x99ouvrir %s"};
+static const char *const str_de[NSTR] = {
+    "Mobil", "TV / Eing\xc3\xa4nge", "Verbindungsanleitung", "H\xc3\xa4ufig gesehene Sender",
+    "Senderliste anzeigen", "Alle Sender durchsuchen", "Keine Informationen",
+    "Mit den Pfeilen bewegen    OK zum Ablegen", "Kabel", "Antenne", "Satellit", "Live-TV",
+    "OK zum Bewegen    Hoch zum Ausblenden oder L\xc3\xb6schen    Zur\xc3\xbc" "ck zum Beenden", "\xe2\x80\x9e%s\xe2\x80\x9c l\xc3\xb6schen?", "L\xc3\xb6schen", "Abbrechen",
+    "Zuletzt verwendet", "Alle schlie\xc3\x9f" "en", "OK auf einer App halten zum Bearbeiten    Blau halten f\xc3\xbcr den Bildschirmschoner",
+    "Keine zuletzt verwendeten Apps", "%s konnte nicht ge\xc3\xb6" "ffnet werden"};
+static const char *const str_it[NSTR] = {
+    "Mobile", "TV / Ingressi", "Guida alla connessione", "Canali pi\xc3\xb9 visti",
+    "Vedi elenco canali", "Sfoglia tutti i canali", "Nessuna informazione",
+    "Usa le frecce per spostare    OK per posare", "Cavo", "Antenna", "Satellite", "TV in diretta",
+    "OK per spostare    Su per nascondere o eliminare    Indietro per finire", "Eliminare \xe2\x80\x9c%s\xe2\x80\x9d?", "Elimina", "Annulla",
+    "Recenti", "Chiudi tutto", "Tieni premuto OK su un\xe2\x80\x99" "app per modificare    Tieni premuto blu per il salvaschermo",
+    "Nessuna app recente", "Impossibile aprire %s"};
+static const char *S(int k) {
+    static const struct { const char *lang; const char *const *s; } tr[] = {
+        {"pt", str_pt}, {"es", str_es}, {"fr", str_fr}, {"de", str_de}, {"it", str_it}};
+    for (unsigned i = 0; i < sizeof tr / sizeof *tr; i++) if (!strcmp(ui_lang, tr[i].lang)) return tr[i].s[k];
+    return str_en[k];
+}
 
 typedef struct { const char *lang, *wd[7], *mo[12], *fmt; } DateLocale;
 /* fmt: W weekday, D day, M month */
@@ -552,9 +694,12 @@ static Kind item_kind(const Row *r, const Item *it) { return r->kind == K_WHITE 
 /* open addressing on an FNV hash: render looks headings and labels up every frame */
 #define TCACHE_SLOTS 2048
 #define TCACHE_SWEEP 1024 /* entries that start a sweep (tcache_sweep) */
+#define TCACHE_BYTES (24 * 1024 * 1024) /* so do this many bytes of pixels */
 typedef struct { char *key; unsigned h; Tex t; double used; } CacheEnt;
 static CacheEnt tcache[TCACHE_SLOTS];
 static int ntcache; /* entries; update() reads it to tell a real decode from a cache hit */
+static long tcache_bytes;
+static long tex_bytes(const Tex *t) { return (long)t->w * t->h * 4; }
 static unsigned fnv(const char *s) { unsigned h = 2166136261u; while (*s) h = (h ^ (unsigned char)*s++) * 16777619u; return h; }
 static CacheEnt *tcache_slot(const char *key, unsigned h) {
     for (unsigned i = h & (TCACHE_SLOTS - 1);; i = (i + 1) & (TCACHE_SLOTS - 1))
@@ -573,19 +718,21 @@ static Tex tcache_put(const char *key, Tex t) {
     unsigned h = fnv(key);
     CacheEnt *e = tcache_slot(key, h);
     if (!e->key) { e->key = strdup(key); e->h = h; ntcache++; }
+    tcache_bytes += tex_bytes(&t) - tex_bytes(&e->t);
     e->t = t; e->used = now_ms();
     return t;
 }
-/* Home runs for weeks and every programme name is a new text: once the cache passes
- * TCACHE_SWEEP entries, textures no item holds and nothing looked up for a minute are deleted.
- * Runs between frames only (update()), so no texture a frame is drawing goes away. Empty
- * entries stay: they remember what is missing. */
+/* Home runs for weeks: every programme name is a new text, and every time an app is used, a new
+ * snapshot. Past TCACHE_SWEEP entries, textures no item holds and nothing looked up for a minute
+ * are deleted; past TCACHE_BYTES the minute becomes a second. Runs between frames only (update()),
+ * so no texture a frame is drawing goes away. Empty entries stay: they remember what is missing. */
 static int cmp_gluint(const void *a, const void *b) { GLuint x = *(const GLuint *)a, y = *(const GLuint *)b; return x < y ? -1 : x > y; }
 static void tcache_sweep(int force) {
     static double last;
-    if (!force && (ntcache < TCACHE_SWEEP || now_ms() - last < 30 * 1000.0)) return;
+    int heavy = tcache_bytes > TCACHE_BYTES;
+    if (!force && ((ntcache < TCACHE_SWEEP && !heavy) || now_ms() - last < 30 * 1000.0)) return;
     /* forced (dev "sweep"): everything not drawn in the last second goes, to test re-creating it */
-    double a = last = now_ms(), cutoff = a - (force ? 1000.0 : 60 * 1000.0);
+    double a = last = now_ms(), cutoff = a - (force || heavy ? 1000.0 : 60 * 1000.0);
     /* the textures items hold, sorted, to look each entry up in */
     static GLuint *held; static size_t cap;
     size_t nh = 0;
@@ -603,11 +750,11 @@ static void tcache_sweep(int force) {
         CacheEnt *e = &tcache[i];
         if (!e->key) continue;
         if (!e->t.id || e->used > cutoff || (nh && bsearch(&e->t.id, held, nh, sizeof *held, cmp_gluint))) keep[nk++] = *e;
-        else { glDeleteTextures(1, &e->t.id); free(e->key); freed++; }
+        else { tcache_bytes -= tex_bytes(&e->t); glDeleteTextures(1, &e->t.id); free(e->key); freed++; }
     }
     memset(tcache, 0, sizeof tcache); ntcache = 0;
     for (int k = 0; k < nk; k++) { *tcache_slot(keep[k].key, keep[k].h) = keep[k]; ntcache++; }
-    logf_("tcache sweep: %d freed, %d kept, %.1f ms", freed, nk, now_ms() - a);
+    logf_("tcache sweep: %d freed, %d kept, %.1f MB, %.1f ms", freed, nk, tcache_bytes / 1e6, now_ms() - a);
 }
 
 /* A font is a weight and a pixel size, opened on first use: FR(27) is LG Smart UI Regular 27,
@@ -623,6 +770,29 @@ static TTF_Font *font(int f) {
     if (!open[bold][px])
         open[bold][px] = TTF_OpenFont(bold ? "/usr/share/fonts/LG_Smart_UI-SemiBold.ttf" : "/usr/share/fonts/LG_Smart_UI-Regular.ttf", px);
     return open[bold][px];
+}
+/* LG's UI font is Latin, Greek and Cyrillic. A name in another script is drawn whole in the first
+ * of the TV's other fonts that has it. SDL_ttf neither shapes nor reorders, so Arabic and Hebrew
+ * show their letters, not joined up. */
+static TTF_Font *font_for(int f, const char *s) {
+    TTF_Font *base = font(f);
+    if (!base || !s) return base;
+    static const char *const files[] = {"/usr/share/fonts/LG_Smart_UI_JP.ttf", "/usr/share/fonts/LG_Smart_UI_AR_HE_TH-Regular.ttf", "/usr/share/fonts/DroidSansFallback.ttf"};
+    enum { NFILES = sizeof files / sizeof *files };
+    static TTF_Font *open[NFILES][128];
+    int px = f >= 1000 ? f - 1000 : f;
+    if (px <= 0 || px >= 128) px = 24;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p < 0xC0) continue;
+        unsigned cp = *p >= 0xF0 ? 0xFFFF : *p >= 0xE0 ? (*p & 15u) << 12 | (p[1] & 63u) << 6 | (p[1] ? p[2] & 63u : 0) : (*p & 31u) << 6 | (p[1] & 63u);
+        if (cp == 0xFFFF || TTF_GlyphIsProvided(base, (Uint16)cp)) continue;
+        for (int i = 0; i < NFILES; i++) {
+            if (!open[i][px]) open[i][px] = TTF_OpenFont(files[i], px);
+            if (open[i][px] && TTF_GlyphIsProvided(open[i][px], (Uint16)cp)) return open[i][px];
+        }
+        break;
+    }
+    return base;
 }
 /* LG's top buttons are glyphs of its "Sandstone Icons" font above U+FFFF, which SDL_ttf 2.0.14 (UCS-2)
  * cannot reach, so FreeType renders them directly */
@@ -692,7 +862,7 @@ static Tex text_cached(int f, int maxw, const char *s) {
     if (!s || !*s) { Tex z = {0, 0, 0}; return z; }
     char key[300]; snprintf(key, sizeof key, "T%d/%d:%s", f, maxw, s);
     const Tex *c = tcache_get(key);
-    return c ? *c : tcache_put(key, text_fit(font(f), s, maxw));
+    return c ? *c : tcache_put(key, text_fit(font_for(f, s), s, maxw));
 }
 
 static Item *row_add(Row *r) {
@@ -722,6 +892,9 @@ static void row_merge(Row *r, Row *nw) {
             if (matched[i] || o->dying || strcmp(o->id, it.id)) continue;
             matched[i] = 1;
             it.focus = o->focus; it.press = o->press; it.life = o->life; it.ax = o->ax; it.ax_set = o->ax_set; it.hf = o->hf;
+            it.zoom = o->zoom; it.zin = o->zin; it.z0 = o->z0; it.fstart = o->fstart; /* a list update is no reason to bounce */
+            /* until load_item has looked again, what was there */
+            it.icon_tex = o->icon_tex; it.image_tex = o->image_tex; it.title_tex = o->title_tex; it.sub_tex = o->sub_tex; it.sub2_tex = o->sub2_tex;
             break;
         }
         out[n++] = it;
@@ -809,13 +982,10 @@ static bool on_reply(LSHandle *h, LSMessage *msg, void *ctx) {
     if (c->sub && !ok && !cJSON_IsTrue(cJSON_GetObjectItem(root, "subscribed"))) {
         /* the subscription ended (its service went down or restarted; Home outlives them all
          * in standby): subscribe again, waiting longer after each failure, up to a minute.
-         * A refusal will not change, so that one is left alone. */
+         * A refusal rarely changes, so that one is only tried again now and then. */
         LSCallCancel(ls, c->token, NULL);
-        if (refused(raw)) { logf_("  not retried"); call_free(c); }
-        else {
-            c->backoff = c->backoff ? (c->backoff * 2 > 60 ? 60 : c->backoff * 2) : 2;
-            g_timeout_add_seconds((guint)c->backoff, sub_retry, c);
-        }
+        c->backoff = refused(raw) ? 300 : c->backoff ? (c->backoff * 2 > 60 ? 60 : c->backoff * 2) : 2;
+        g_timeout_add_seconds((guint)c->backoff, sub_retry, c);
         cJSON_Delete(root);
         return true;
     }
@@ -848,7 +1018,7 @@ static void subscribe(const char *uri, const char *payload, json_cb cb) {
     if (!ls) return;
     Call *c = calloc(1, sizeof *c);
     c->cb = cb; c->sub = 1; scpy(c->uri, sizeof c->uri, uri); c->payload = strdup(payload);
-    if (!sub_start(c)) call_free(c);
+    if (!sub_start(c)) { c->backoff = 2; g_timeout_add_seconds(2, sub_retry, c); }
 }
 static int sub_start(Call *c) {
     LSError e; LSErrorInit(&e);
@@ -866,8 +1036,13 @@ static void luna_init(void) {
     LSError e; LSErrorInit(&e);
     /* Home's role grants its permissions to the name com.webos.app.home; an anonymous client of
      * that executable may only reach two video services. The dev app registers anonymously. */
-    if (!LSRegister(as_home ? "com.webos.app.home" : NULL, &ls, &e)) {
-        logf_("LSRegister: %s", e.message); LSErrorFree(&e); ls = NULL; return;
+    for (int tries = 0; !LSRegister(as_home ? "com.webos.app.home" : NULL, &ls, &e); tries++) {
+        logf_("LSRegister: %s", e.message); LSErrorFree(&e); ls = NULL;
+        if (!as_home) return;
+        /* the name may still be held by the instance that just died. Without the bus Home is
+         * an empty screen that looks alive: better a failed start, which the safety net counts */
+        if (tries == 20) { logf_("no bus: giving up"); _exit(1); }
+        SDL_Delay(500);
     }
     if (!LSGmainContextAttach(ls, g_main_context_default(), &e)) { logf_("LSGmainContextAttach: %s", e.message); LSErrorFree(&e); }
     logf_("luna registered");
@@ -904,19 +1079,24 @@ static void queue_copy(const char *src, const char *dst) {
  * per frame (decoder_poll), and puts them in the cache. A key being decoded is "pending": asked
  * for again meanwhile, it is not queued twice. */
 
-typedef struct Job { struct Job *next; char key[640]; char path[PATH_MAX + 32]; int wallpaper; SDL_Surface *s, *blur; double ms; char err[160]; } Job;
+typedef struct Job { struct Job *next; char key[640]; char path[PATH_MAX + 32]; int wallpaper, thumb; SDL_Surface *s, *blur; double ms; char err[160]; } Job;
 static Job *todo_head, *todo_tail, *done_head;
 static SDL_mutex *dec_lock;
 static SDL_cond *dec_cond;
 static SDL_Thread *decoder;
 static char **pend; static int npend, cpend;
 static Tex wallpaper, wallpaper_frost;
+static char wallpaper_shipped[PATH_MAX + 32]; /* what a wallpaper that won't load falls back to */
+/* what Recents draws a snapshot at, focused; LG's own files are several times that */
+#define THUMB_W 400
+#define THUMB_H 225
 
 static void job_decode(Job *j) {
     double a = now_ms();
     j->s = decode_png(j->path);
     if (!j->s) scpy(j->err, sizeof j->err, SDL_GetError()); /* SDL's error is per thread */
-    if (j->s && j->wallpaper) { j->blur = frost(j->s); scrim_wallpaper(j->s); }
+    if (j->s && j->wallpaper) { j->s = fit(j->s, (int)W, (int)H); j->blur = frost(j->s); scrim_wallpaper(j->s); }
+    if (j->s && j->thumb) j->s = fit(j->s, THUMB_W, THUMB_H);
     j->ms = now_ms() - a;
 }
 
@@ -943,9 +1123,9 @@ static void decoder_start(void) {
 
 static int pending(const char *key) { for (int i = 0; i < npend; i++) if (!strcmp(pend[i], key)) return 1; return 0; }
 
-static void decoder_push(const char *key, const char *path, int is_wallpaper) {
+static void decoder_push(const char *key, const char *path, int is_wallpaper, int thumb) {
     Job *j = calloc(1, sizeof *j);
-    scpy(j->key, sizeof j->key, key); scpy(j->path, sizeof j->path, path); j->wallpaper = is_wallpaper;
+    scpy(j->key, sizeof j->key, key); scpy(j->path, sizeof j->path, path); j->wallpaper = is_wallpaper; j->thumb = thumb;
     if (!decoder) { /* no thread: decode here */
         job_decode(j);
         j->next = done_head; done_head = j;
@@ -974,10 +1154,13 @@ static int decoder_poll(int max) {
         if (!j->s) logf_("img: %s: %s", j->path, j->err);
         else vlogf_("img: %s %dx%d %.1fms", j->path, t.w, t.h, j->ms);
         if (j->s) SDL_FreeSurface(j->s);
-        if (j->wallpaper) {
+        if (j->wallpaper && t.id) {
             tex_free(&wallpaper); wallpaper = t;
             tex_free(&wallpaper_frost); wallpaper_frost = upload(j->blur);
             if (j->blur) SDL_FreeSurface(j->blur);
+        } else if (j->wallpaper) { /* a broken file of someone's own must not leave Home black */
+            if (j->blur) SDL_FreeSurface(j->blur);
+            if (strcmp(j->path, wallpaper_shipped)) decoder_push("@wallpaper-shipped", wallpaper_shipped, 1, 0);
         }
         else tcache_put(j->key, t); /* an empty one too: a file that won't decode isn't tried again */
         for (int i = 0; i < npend; i++)
@@ -989,9 +1172,11 @@ static int decoder_poll(int max) {
 
 /* versioned: the key carries the file's mtime, for pictures rewritten in place (recents
  * snapshots, an updated app's icon). The file itself when we can read it (as Home), else our
- * copy (the dev app) */
-static Tex icon_load_(const char *src, int versioned) {
+ * copy (the dev app). icon_waiting says the empty result is only "not decoded yet". */
+static int icon_waiting;
+static Tex icon_load_(const char *src, int versioned, int thumb) {
     Tex z = {0, 0, 0};
+    icon_waiting = 0;
     if (!src || !*src || strncmp(src, "/", 1)) return z; /* local files only */
     char key[640];
     struct stat st;
@@ -999,14 +1184,20 @@ static Tex icon_load_(const char *src, int versioned) {
     else scpy(key, sizeof key, src);
     const Tex *c = tcache_get(key);
     if (c) return *c;
+    icon_waiting = 1;
     if (pending(key)) return z;
     char cp[PATH_MAX + 32]; icon_cache_path(src, cp, sizeof cp);
-    if (access(src, R_OK) == 0) decoder_push(key, src, 0);
-    else if (access(cp, R_OK) == 0) decoder_push(key, cp, 0);
-    else queue_copy(src, cp);
+    if (access(src, R_OK) == 0) decoder_push(key, src, 0, thumb);
+    else if (access(cp, R_OK) == 0) decoder_push(key, cp, 0, thumb);
+    else { queue_copy(src, cp); icon_waiting = 0; }
     return z;
 }
-static Tex icon_load(const char *src) { return icon_load_(src, 0); }
+static Tex icon_load(const char *src) { return icon_load_(src, 0, 0); }
+/* an item's picture: the one it shows stays until its replacement has landed */
+static void load_picture(Tex *t, const char *src, int versioned, int thumb) {
+    Tex n = icon_load_(src, versioned, thumb);
+    if (n.id || !icon_waiting) *t = n;
+}
 
 static void on_copied(cJSON *root, const char *raw) {
     (void)raw;
@@ -1107,20 +1298,10 @@ static void hidden_set(const char *id, int on) {
     hidden_save();
     logf_("%s %s", on ? "hide" : "unhide", id);
 }
-/* forget apps no longer installed (else a reinstalled one would come back hidden) */
-static void hidden_prune(const Row *r) {
-    int kept = 0;
-    for (int i = 0; i < nhidden; i++) {
-        int found = 0;
-        for (int k = 0; k < r->n && !found; k++) found = !strcmp(r->items[k].id, hidden_ids[i]);
-        if (found) hidden_ids[kept++] = hidden_ids[i];
-        else { logf_("hidden: %s is gone", hidden_ids[i]); free(hidden_ids[i]); }
-    }
-    if (kept != nhidden) { nhidden = kept; hidden_save(); }
-}
-
 static int edit_mode_moving(void);
 static void apps_fix_sel(void);
+enum { ED_OFF, ED_BROWSE, ED_MOVE, ED_TRASH, ED_CONFIRM, ED_HIDE }; /* ED_HIDE: the eye over a tile, ours */
+static int edit_mode;
 static int lp_stale; /* a launch point update arrived while a tile was carried */
 static void on_launchpoints(cJSON *root, const char *raw) {
     (void)raw;
@@ -1161,9 +1342,12 @@ static void on_launchpoints(cJSON *root, const char *raw) {
         it->hf = it->hidden; /* a new hidden app starts collapsed (row_merge keeps a known one's) */
     }
     logf_("apps: %d launch points", nw.n);
-    if (nw.n) hidden_prune(&nw);
-    row_merge(&rows[ROW_APPS], &nw);
+    Row *ar = &rows[ROW_APPS];
+    char was[200] = ""; if (ar->n) scpy(was, sizeof was, ar->items[ar->sel].id);
+    row_merge(ar, &nw);
     apps_fix_sel();
+    /* the trash, the eye and the dialog are about the focused app: if that changed under them, they no longer are */
+    if (edit_mode >= ED_TRASH && (!ar->n || strcmp(was, ar->items[ar->sel].id))) edit_mode = ED_BROWSE;
     build_dash();
 }
 
@@ -1175,6 +1359,7 @@ static int ninputs;
 static char channel_mode[40] = "";
 static int airplay_on;
 
+static void build_pills(void);
 static void on_inputs(cJSON *root, const char *raw) {
     (void)raw;
     cJSON *devs = cJSON_GetObjectItem(root, "devices");
@@ -1207,7 +1392,11 @@ static void on_inputs(cJSON *root, const char *raw) {
         snprintf(in->icon, sizeof in->icon, "%s%s", jstr(d, "iconPrefix"), jstr(d, "icon"));
     }
     logf_("inputs: %d", ninputs);
+    build_pills();
+    build_dash();
+}
 
+static void build_pills(void) {
     Row nw = {0};
     Item *tv = row_add(&nw);
     scpy(tv->id, sizeof tv->id, "com.webos.app.livetv");
@@ -1222,11 +1411,11 @@ static void on_inputs(cJSON *root, const char *raw) {
         scpy(it->icon, sizeof it->icon, inputs[i].icon);
     }
     row_merge(&rows[ROW_INPUTS], &nw);
-    build_dash();
 }
 
 static void on_channel_mode(cJSON *root, const char *raw) {
     (void)raw;
+    if (!cJSON_IsTrue(cJSON_GetObjectItem(root, "returnValue"))) return;
     const char *m = jstr(cJSON_GetObjectItem(root, "channelMode"), "channelModeName");
     scpy(channel_mode, sizeof channel_mode, m);
     build_dash();
@@ -1234,6 +1423,7 @@ static void on_channel_mode(cJSON *root, const char *raw) {
 
 static void on_airplay(cJSON *root, const char *raw) {
     (void)raw;
+    if (!cJSON_IsTrue(cJSON_GetObjectItem(root, "returnValue"))) return;
     airplay_on = cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(root, "settings"), "supportAirplay"));
     build_dash();
 }
@@ -1294,7 +1484,7 @@ static void build_dash(void) {
  * iepg/getCurrentEventList (its localStartTime/localEndTime give the progress bar). */
 
 typedef struct { char id[64], name[120], number[16]; char prog[200]; time_t start, end; } Chan;
-static Chan chans[10];
+static Chan chans[9];
 static int nchans;
 static char last_channel[64];
 /* iepg's channel list, reduced to what the cards show (the reply is ~67 KB of JSON) */
@@ -1309,14 +1499,19 @@ static void on_rank(cJSON *root, const char *raw) {
     (void)raw;
     rank_failed = !cJSON_IsTrue(cJSON_GetObjectItem(root, "returnValue"));
     if (rank_failed) return; /* keep what we had; the minute tick asks again */
+    /* what is known about a channel stays until the new programme list arrives: cards don't
+     * blink to "No information" each time Home comes back */
+    static Chan old[9];
+    int nold = nchans;
+    memcpy(old, chans, sizeof(Chan) * (size_t)nold);
     nchans = 0;
     cJSON *c;
     cJSON_ArrayForEach(c, cJSON_GetObjectItem(root, "channelList")) {
         if (nchans >= 9) break;
-        scpy(chans[nchans].id, sizeof chans[0].id, jstr(c, "channelId"));
-        chans[nchans].name[0] = chans[nchans].number[0] = chans[nchans].prog[0] = 0;
-        chans[nchans].start = chans[nchans].end = 0;
-        nchans++;
+        Chan *n = &chans[nchans++];
+        memset(n, 0, sizeof *n);
+        scpy(n->id, sizeof n->id, jstr(c, "channelId"));
+        for (int i = 0; i < nold; i++) if (!strcmp(old[i].id, n->id)) *n = old[i];
     }
     ranked = 1;
     logf_("channels: %d ranked", nchans);
@@ -1417,6 +1612,7 @@ static void build_channels(void) {
     if (!events_requested && nchans) { events_requested = 1; request_events(); }
 
     Row nw = {0};
+    if (!nchnames) { row_merge(&rows[ROW_CHANNELS], &nw); return; } /* no tuner set up: no row */
     Item *it = row_add(&nw);
     scpy(it->id, sizeof it->id, "ch:list");
     scpy(it->app, sizeof it->app, "com.webos.app.livemenu");
@@ -1478,14 +1674,33 @@ static void on_locale(cJSON *root, const char *raw) {
     if (!*ui) return;
     char lang[8]; scpy(lang, sizeof lang, ui);
     char *dash = strchr(lang, '-'); if (dash) *dash = 0;
-    logf_("locale: UI %s -> %s", ui, lang);
+    /* the setting when there is one, else what the region's clocks say */
+    const char *fmt = jstr(cJSON_GetObjectItem(li, "locales"), "FMT");
+    const char *ck = jstr(li, "clock"), *region = strrchr(*fmt ? fmt : ui, '-');
+    static const char regions12[] = " US CA AU NZ PH IN KR MY SG SA EG PK BD CO ";
+    char want[6] = ""; if (region) snprintf(want, sizeof want, " %.2s ", region + 1);
+    int h12 = !strcmp(ck, "12") || (strcmp(ck, "24") && *want && strstr(regions12, want));
+    logf_("locale: UI %s -> %s, %d hour clock", ui, lang, h12 ? 12 : 24);
+    if (h12 != hour12) { hour12 = h12; clock_str[0] = 0; }
     if (!strcmp(lang, ui_lang)) return;
     scpy(ui_lang, sizeof ui_lang, lang);
     clock_str[0] = 0;
-    build_dash(); build_channels();
+    build_pills(); build_dash(); build_channels();
 }
 
 static void on_launched(cJSON *root, const char *raw) { (void)root; vlogf_("reply: %.200s", raw ? raw : ""); }
+
+/* an app that would not start says so, in the system's own toast */
+static char launching[200];
+static void on_app_launched(cJSON *root, const char *raw) {
+    if (!root || cJSON_IsTrue(cJSON_GetObjectItem(root, "returnValue")) || (raw && strstr(raw, "already"))) { vlogf_("reply: %.200s", raw ? raw : ""); return; }
+    char m[300]; snprintf(m, sizeof m, S(S_CANT_OPEN), launching);
+    cJSON *p = cJSON_CreateObject();
+    cJSON_AddStringToObject(p, "sourceId", "com.webos.app.home"); cJSON_AddStringToObject(p, "message", m);
+    char *ps = cJSON_PrintUnformatted(p); cJSON_Delete(p);
+    call("luna://com.webos.notification/createToast", ps, on_launched);
+    free(ps);
+}
 
 static double last_launch_ms = -1e9;
 static void launch(Item *it) {
@@ -1508,7 +1723,8 @@ static void launch(Item *it) {
     if (it->params) cJSON_AddItemToObject(p, "params", cJSON_Parse(it->params));
     char *s = cJSON_PrintUnformatted(p); cJSON_Delete(p);
     logf_("launch %s", s);
-    call("luna://com.webos.applicationManager/launch", s, on_launched);
+    scpy(launching, sizeof launching, it->title);
+    call("luna://com.webos.applicationManager/launch", s, on_app_launched);
     free(s);
 }
 
@@ -1540,12 +1756,13 @@ static void start_subscriptions(void) {
 }
 /* Coming back to the front re-reads what changes while away (clock, the channel ranking and the
  * programmes on now). The big, slow-changing list (iepg's channel list, ~67 KB) is parsed on
- * this thread, so it is read at most every 30 min. */
+ * this thread, so it is read at most every 30 min, or until one read has worked: services
+ * can still be starting when Home does. */
 static double last_full_refresh = -1e12;
 static void refresh(void) {
     call("luna://com.palm.systemservice/time/getSystemTime", "{}", on_time);
     events_requested = 0;
-    if (now_ms() - last_full_refresh > 30 * 60 * 1000.0) {
+    if (now_ms() - last_full_refresh > 30 * 60 * 1000.0 || nchnames < 0 || !channel_mode[0]) {
         last_full_refresh = now_ms();
         call("luna://com.webos.service.utp.channel/getChannelMode", "{}", on_channel_mode);
         call("luna://com.webos.settingsservice/getSystemSettings", "{\"key\":\"supportAirplay\",\"category\":\"other\"}", on_airplay);
@@ -1555,8 +1772,6 @@ static void refresh(void) {
 
 /* LG's edit mode (MainRibbon.qml), entered by a long press on an app: browse the tiles, pick one
  * up and carry it with the arrows, or go Up to the trash over it and confirm */
-enum { ED_OFF, ED_BROWSE, ED_MOVE, ED_TRASH, ED_CONFIRM, ED_HIDE }; /* ED_HIDE: the eye over a tile, ours */
-static int edit_mode;
 /* an item focus passes over: gone, or hidden while not editing */
 static int skipped(const Item *it) { return it->dying || (it->hidden && !edit_mode); }
 /* focus must not rest on a hidden app outside edit mode: the nearest shown one takes it */
@@ -1686,7 +1901,7 @@ static void recents_key(int dx, int dy, int ok, int back) {
         } else if (ok) recents_show(0);
         return;
     }
-    if (!live) { rec_part = 2; return; }
+    if (!live) { if (ok) recents_show(0); return; }
     if (dx) {
         int j = r->sel + dx;
         while (j >= 0 && j < r->n && r->items[j].dying) j += dx;
@@ -1788,6 +2003,7 @@ static void layout_rows(void) {
         rows[ri].y = y;
         if (row_live(&rows[ri])) y += row_pitch(ri);
     }
+    while (cur_row > ROW_APPS && cur_row <= LAST_PAGE_ROW && !row_live(&rows[cur_row])) cur_row--; /* the row left from under the focus */
     if (cur_row <= ROW_APPS) page_target = 0;
     else page_target = DASH_PAGE + fmaxf(0, rows[cur_row].y + row_h(&rows[cur_row]) - DASH_PAGE - 1040);
 }
@@ -1796,8 +2012,8 @@ static void layout_rows(void) {
 static void load_item(int ri, Item *it) {
     Row *r = &rows[ri];
     Kind k = item_kind(r, it);
-    if (it->icon[0]) it->icon_tex = icon_load_(it->icon, k == K_APP || k == K_RECENT);
-    if (it->image[0]) it->image_tex = icon_load_(it->image, k == K_RECENT);
+    if (it->icon[0]) load_picture(&it->icon_tex, it->icon, k == K_APP || k == K_RECENT, 0);
+    if (it->image[0]) load_picture(&it->image_tex, it->image, k == K_RECENT, k == K_RECENT);
     float w = item_w(r, it);
     switch (k) {
     case K_APP: it->title_tex = text_cached(F_TILE, (int)(TILE * TILE_FOCUS) - 16, it->title); break;
@@ -1931,8 +2147,11 @@ static int update(float dt) {
     /* clock */
     time_t t = time(NULL) + tz_offset;
     struct tm tm; gmtime_r(&t, &tm);
-    char cs[16]; strftime(cs, sizeof cs, "%H:%M", &tm);
-    if (strcmp(cs, clock_str)) {
+    char cs[16];
+    if (hour12) snprintf(cs, sizeof cs, "%d:%02d %s", tm.tm_hour % 12 ? tm.tm_hour % 12 : 12, tm.tm_min, tm.tm_hour < 12 ? "AM" : "PM");
+    else snprintf(cs, sizeof cs, "%02d:%02d", tm.tm_hour, tm.tm_min);
+    /* hidden, no one sees it: it catches up when Home comes back */
+    if (strcmp(cs, clock_str) && (on_screen || !clock_tex.id)) {
         char ds[96];
         scpy(clock_str, sizeof clock_str, cs);
         format_date(ds, sizeof ds, &tm);
@@ -1943,6 +2162,10 @@ static int update(float dt) {
         /* once a minute: the programmes' progress moves on, and a programme may have ended.
          * Not while hidden (standby can last weeks): coming back to the front refreshes them. */
         if (rank_failed && on_screen) request_rank();
+        if (nchnames < 0 && on_screen) refresh();
+        /* the system may not push a daylight-saving change, which leaves the UTC clock alone */
+        static int asked_hour = -1;
+        if (tm.tm_min == 0 && tm.tm_hour != asked_hour) { asked_hour = tm.tm_hour; call("luna://com.palm.systemservice/time/getSystemTime", "{}", on_time); }
         if (nchans && on_screen) { build_channels(); if (tm.tm_min % 5 == 0) request_events(); }
         moving = 1;
     }
@@ -2139,7 +2362,7 @@ static void draw_card(Row *r, Item *it, float x, float y) {
     if (off > cycle - avail) draw_text(&full, x0 + pad - off + cycle, ty - full.h, fg, 0);
     flush();
     glDisable(GL_SCISSOR_TEST);
-    marquee_until = now_ms() + 100;
+    if (now_ms() - last_input_ms < IDLE_DIM_MS) marquee_until = now_ms() + 100; /* left alone: stand still */
 }
 
 /* the Recents panel: LG's layout, measured off its screen at 1080p */
@@ -2154,14 +2377,21 @@ static void draw_recents(void) {
     } else fill(0, py, W, H - py + 2, 0, rgba(0.19f, 0.20f, 0.22f, 0.97f));
     Tex title = text_cached(F_TITLE, 0, S(S_RECENTS));
     draw_text(&title, 48, py + 50, rgba(1, 1, 1, 1), 0);
+    Row *r = &rows[ROW_RECENTS];
+    rec_py = py;
+    rec_trash_r[0] = rec_close_r[0] = -1;
+    if (!row_live(r) && !closing_all) { /* nothing to close: a line says so where the cards would be */
+        Tex none = text_cached(F_CARD_SUB, 0, S(S_NO_RECENTS));
+        draw_text(&none, (W - none.w) * 0.5f, py + 240, rgba(1, 1, 1, 0.7f), 0);
+        return;
+    }
     /* Close All */
     /* LG's SimpleButton, small: SemiBold 30, 21 px margins, at least 150 x 60, #7d848c / #e6e6e6 */
     Tex ct = text_cached(FS(30), 0, S(S_CLOSE_ALL));
     /* measured off LG's screen: the label sits in 34 px of padding a side (its margin items
      * plus the label area's own inset) */
     float bw = fmaxf(150.f, ct.w + 68.f), bh = 60, bx = W - 48 - bw, by = py + 40;
-    rec_py = py; set_rect(rec_close_r, bx, by, bw, bh);
-    rec_trash_r[0] = -1;
+    set_rect(rec_close_r, bx, by, bw, bh);
     if (rec_close_f > 0.01f) draw(bx, by + 6, bw, bh, 6, 14, rgba(0, 0, 0, 0.5f * rec_close_f), NULL, 1, 1);
     const Col nb = {0x7d / 255.f, 0x84 / 255.f, 0x8c / 255.f, 1}, fb = {0xe6 / 255.f, 0xe6 / 255.f, 0xe6 / 255.f, 1};
     const Col nt = fb, ft = {0x4c / 255.f, 0x50 / 255.f, 0x59 / 255.f, 1};
@@ -2169,7 +2399,6 @@ static void draw_recents(void) {
     fill(bx, by, bw, bh, 6, rgba(nb.r + (fb.r - nb.r) * q, nb.g + (fb.g - nb.g) * q, nb.b + (fb.b - nb.b) * q, 1));
     draw_text(&ct, bx + (bw - ct.w) * 0.5f, by + (bh - ct.h) * 0.5f, q > 0.5f ? ft : nt, 0);
     /* the cards */
-    Row *r = &rows[ROW_RECENTS];
     float y = py + 180;
     for (int pass = 0; pass < 3; pass++)
         for (int i = 0; i < r->n; i++) {
@@ -2381,9 +2610,8 @@ static int edit_mode_moving(void) { return edit_mode == ED_MOVE; }
 static void edit_drop(void) {
     if (edit_mode != ED_MOVE) return;
     edit_mode = ED_BROWSE;
-    if (lp_stale) { lp_stale = 0; call("luna://com.webos.applicationManager/listLaunchPoints", "{}", on_launchpoints); }
     Row *r = &rows[ROW_APPS];
-    if (!r->n || r->sel == move_from) return;
+    if (r->n && r->sel != move_from) {
     Item *it = &r->items[r->sel];
     /* SAM's position counts our own launch point, which the row leaves out */
     int pos = 0;
@@ -2392,6 +2620,9 @@ static void edit_drop(void) {
     char p[300]; snprintf(p, sizeof p, "{\"launchPointId\":\"%s\",\"position\":%d}", it->lpid, pos);
     logf_("move %s", p);
     call("luna://com.webos.applicationManager/moveLaunchPoint", p, on_moved);
+    }
+    /* after the move, or the reply would carry the old order */
+    if (lp_stale) { lp_stale = 0; call("luna://com.webos.applicationManager/listLaunchPoints", "{}", on_launchpoints); }
 }
 
 static void edit_exit(void) { edit_drop(); edit_mode = ED_OFF; apps_fix_sel(); }
@@ -2410,6 +2641,9 @@ static void on_removed(cJSON *root, const char *raw) {
 static void edit_delete(void) {
     Row *r = &rows[ROW_APPS];
     if (!r->n) return;
+    /* forgotten only here, so it doesn't come back hidden if reinstalled. An app merely missing
+     * from a list (a USB drive out, a service restarting) is still wanted hidden when it returns */
+    hidden_set(r->items[r->sel].id, 0);
     Item *it = &r->items[r->sel];
     /* LG deletes through SAM's removeLaunchPoint (LaunchPointInterfaces.qml); for an app's
      * default launch point that uninstalls it. The row closes up when SAM pushes the change. */
@@ -2608,7 +2842,7 @@ static void ok_poll(void) {
     if (edit_mode || recents_open) return;
     int ri = cur_row, i = rows[cur_row].sel;
     if (ok_is_click && !pointer_hit(ok_x, ok_y, &ri, &i)) return;
-    if (ri != ROW_APPS) return;
+    if (ri != ROW_APPS || !rows[ri].n) return;
     cur_row = ri; rows[ri].sel = i;
     edit_mode = ED_MOVE; move_from = i; /* a long press picks the tile straight up, as on LG's */
     logf_("edit: moving %s", rows[ri].items[i].id);
@@ -2742,11 +2976,99 @@ static void dev_commands(void) {
     fclose(f);
 }
 
+/* ---------- safety net ----------
+ * This binary is the TV's Home: if it can't run, the TV has none, and nobody watching it has a
+ * shell. Each start as Home is counted in /tmp (a reboot starts over); a run past STABLE_MS clears
+ * the count. Reaching START_LIMIT means it keeps dying, so it steps aside: the bind mounts go, and
+ * this process becomes LG's Home in place. FAILED_PATH, holding the binary's md5, keeps the boot
+ * hook from mounting that same build again; a new build gets a new chance. A clean exit (a plain
+ * kill arrives as SDL_QUIT) clears the count too: only dying counts. A hang gets no such
+ * luck by itself, hence the watchdog: the main loop re-arms an alarm, and if it stops doing so
+ * for WATCHDOG_S the process dies and it is restarted, which counts as a start like any other. */
+#define STARTS_PATH "/tmp/homenative-starts"
+#define FAILED_PATH "/var/lib/homenative/failed"
+#define START_LIMIT 4
+#define STABLE_MS 600000.0
+#define WATCHDOG_S 90
+#define HOME_BIN "/usr/bin/com.webos.app.home"
+#define HOME_CKPT "/mnt/lg/cmn_data/checkpoint/com.webos.app.home"
+
+static void safety_check(char **argv) {
+    if (!as_home || dev_enabled) return;
+    int n = 0;
+    FILE *f = fopen(STARTS_PATH, "r");
+    if (f) { if (fscanf(f, "%d", &n) != 1) n = 0; fclose(f); }
+    if (++n < START_LIMIT) {
+        if ((f = fopen(STARTS_PATH, "w"))) { fprintf(f, "%d\n", n); fclose(f); }
+        return;
+    }
+    logf_("safety: %d starts with no stable run: stepping aside for LG's Home", n);
+    remove(STARTS_PATH);
+    mkdir("/var/lib/homenative", 0755);
+    /* the md5 of what is running, which an upgrade may already have replaced on disk; then the
+     * same lifting of the mounts as scripts/restore.sh */
+    char sh[400];
+    snprintf(sh, sizeof sh, "md5sum < /proc/%d/exe > " FAILED_PATH "; umount -l " HOME_BIN "; "
+             "while grep ' " HOME_CKPT " ' /proc/mounts | tail -1 | grep -q '^tmpfs'; do umount -l " HOME_CKPT " || break; done", (int)getpid());
+    if (system(sh)) {}
+    execv(HOME_BIN, argv);
+    logf_("safety: cannot start LG's Home: %s", strerror(errno));
+}
+static void safety_tick(void) {
+    static double armed = -1e9;
+    static int stable;
+    if (!as_home) return;
+    if (now_ms() - armed > 5000) { armed = now_ms(); alarm(WATCHDOG_S); }
+    if (!stable && now_ms() > STABLE_MS) { stable = 1; remove(STARTS_PATH); logf_("safety: stable"); }
+}
+
+/* ---------- waiting ----------
+ * Hidden, the loop sleeps until there is something to do. LG's SDL can't: its
+ * SDL_WaitEventTimeout polls every millisecond, all day, under whatever app is in front. GLib can:
+ * it sleeps in poll() on the luna socket (where the Home key arrives, so that wakes it at once),
+ * and on the Wayland socket too (the remote, window changes), with a timeout for the clock.
+ * If the socket stays readable with nothing for SDL to read (another thread reading it), the
+ * sleep would become a busy loop: spotted here, it is dropped for the plain wait. */
+static guint wake_timer, wl_source;
+static gboolean wake_up(gpointer unused) { (void)unused; wake_timer = 0; return G_SOURCE_REMOVE; }
+static gboolean on_wayland(gint fd, GIOCondition c, gpointer unused) {
+    (void)fd; (void)unused;
+    if (c & (G_IO_HUP | G_IO_ERR)) {
+        /* the compositor went away: a window never comes back on this connection, and SAM
+         * restarts Home. The dev app just stops listening. */
+        logf_("Wayland connection lost");
+        if (as_home) _exit(1);
+        wl_source = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+static void watch_wayland(SDL_Window *win) {
+    SDL_SysWMinfo info;
+    memset(&info, 0, sizeof info);
+    SDL_GetVersion(&info.version); /* the TV's SDL, not the NDK's, which it would turn down */
+    int (*get_fd)(struct wl_display *) = (int (*)(struct wl_display *))dlsym(RTLD_DEFAULT, "wl_display_get_fd");
+    if (get_fd && SDL_GetWindowWMInfo(win, &info) && info.subsystem == SDL_SYSWM_WAYLAND)
+        wl_source = g_unix_fd_add(get_fd(info.info.wl.display), G_IO_IN, on_wayland, NULL);
+    logf_("sleeping on %s", wl_source ? "the Wayland socket" : "a timer");
+}
+static void sleep_ms(int ms) {
+    static int spins;
+    double a = now_ms();
+    wake_timer = g_timeout_add((guint)ms, wake_up, NULL);
+    g_main_context_iteration(NULL, TRUE);
+    if (wake_timer) { g_source_remove(wake_timer); wake_timer = 0; }
+    if (now_ms() - a >= 0.2) spins = 0;
+    else if (++spins > 2000 && wl_source) { logf_("Wayland socket stays readable: back to a timer"); g_source_remove(wl_source); wl_source = 0; }
+}
+
 /* ---------- main ---------- */
 
 int main(int argc, char **argv) {
+    rename(LOG_PATH, LOG_PREV);
     if (!freopen(log_path, "w", stderr) && freopen(DEV_LOG_PATH, "w", stderr)) log_path = DEV_LOG_PATH;
     /* (no log at all is no reason not to run) */
+    fatal_handlers();
     t0 = SDL_GetPerformanceCounter();
     logf_("start argv1=%.300s", argc > 1 ? argv[1] : "");
 
@@ -2762,6 +3084,8 @@ int main(int argc, char **argv) {
     char probe[PATH_MAX + 32]; snprintf(probe, sizeof probe, "%s/assets/wallpaper.png", app_dir);
     if (access(probe, R_OK)) scpy(app_dir, sizeof app_dir, DEV_DIR);
     logf_("running as %s, assets in %s", as_home ? "Home (com.webos.app.home)" : "dev app", app_dir);
+    safety_check(argv);
+    safety_tick(); /* armed from here on: a window that never comes up is a hang too */
 
     setenv("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true", 1);
     /* LG's SDL names the window's app from APPID; SAM sets it for dev apps, not for Home */
@@ -2786,9 +3110,10 @@ int main(int argc, char **argv) {
     int ww, wh; SDL_GetWindowSize(win, &ww, &wh);
     logf_("window %dx%d drawable %dx%d GL %s / %s", ww, wh, dw, dh, glGetString(GL_VERSION), glGetString(GL_RENDERER));
     gl_init();
+    watch_wayland(win);
 
     TTF_Init();
-    IMG_Init(IMG_INIT_PNG);
+    IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
     const char *fl = "/usr/share/fonts/LG_Smart_UI-Light.ttf";
     f_clock = TTF_OpenFont(fl, 96); f_date = TTF_OpenFont(fl, 30); /* larger and lighter than LG's 72 / Regular 28 */
     if (!f_clock || !font(F_PILL)) logf_("font: %s", TTF_GetError());
@@ -2816,9 +3141,10 @@ int main(int argc, char **argv) {
     char wp[PATH_MAX + 32] = "";
     static const char *const own[] = {"/var/lib/homenative/wallpaper.png", "/var/lib/homenative/wallpaper.jpg"};
     for (unsigned i = 0; i < 2 && !wp[0]; i++) if (access(own[i], R_OK) == 0) scpy(wp, sizeof wp, own[i]);
-    if (!wp[0]) snprintf(wp, sizeof wp, "%s/assets/wallpaper.png", app_dir);
+    snprintf(wallpaper_shipped, sizeof wallpaper_shipped, "%s/assets/wallpaper.png", app_dir);
+    if (!wp[0]) scpy(wp, sizeof wp, wallpaper_shipped);
     logf_("wallpaper: %s", wp);
-    decoder_push("@wallpaper", wp, 1);
+    decoder_push("@wallpaper", wp, 1, 0);
     dirty = 1;
 
     /* fps is measured over back-to-back rendered frames only, so idle time doesn't dilute it */
@@ -2842,10 +3168,12 @@ int main(int argc, char **argv) {
         rows[ROW_CHANNELS].label = row_live(&rows[ROW_CHANNELS]) ? S(S_CHANNELS) : NULL;
         ok_poll();
         dev_commands();
+        safety_tick();
         if (relaunch_pending) { /* Home pressed: come to the front on the home screen, as LG's does */
             relaunch_pending = 0;
             edit_exit(); recents_show(0); ok_down = 0;
             cur_row = ROW_APPS;
+            if (!on_screen) { page = page_target = 0; recents_t = 0; } /* already there, not sliding back to it */
             SDL_RaiseWindow(win);
             on_screen = 1; dirty = 1; last_input_ms = now_ms(); dim_f = 0;
         }
@@ -2853,10 +3181,15 @@ int main(int argc, char **argv) {
         int moving = update(dt) || ok_down;
         double d_upd = now_ms() - pu0;
         SDL_Event ev;
-        /* animating and on screen: don't wait. Otherwise wait for an event, waking every 100 ms
-         * for luna (its replies don't wake SDL). Hidden too: the Home key arrives over luna, and
-         * SDL 2.0.10 polls inside this wait anyway, so a longer timeout would only add latency. */
-        int have = on_screen && (moving || dirty) ? SDL_PollEvent(&ev) : SDL_WaitEventTimeout(&ev, 100);
+        /* animating and on screen: don't wait. On screen and still, SDL's own wait: someone is
+         * there, the cost is small, and remote input goes through it. Hidden, which is most of the
+         * day, a real sleep: see "waiting" above. Work still going on (images decoding, a preload
+         * filling the page) only pauses for a frame. */
+        int have = SDL_PollEvent(&ev);
+        if (!have && !(on_screen && (moving || dirty))) {
+            if (on_screen) have = SDL_WaitEventTimeout(&ev, 100);
+            else { sleep_ms(moving || npend ? 16 : wl_source && !dev_enabled ? 1000 : 100); have = SDL_PollEvent(&ev); }
+        }
         while (have) {
             switch (ev.type) {
             case SDL_QUIT: running = 0; break;
@@ -2864,6 +3197,8 @@ int main(int argc, char **argv) {
                 SDL_Keycode k = ev.key.keysym.sym;
                 last_input_ms = now_ms();
                 hint_input();
+                /* blue only ever sends one press: it counts even when it is the one that wakes Home */
+                if (ev.key.keysym.scancode == SCAN_BLUE && !ev.key.repeat) blue_press();
                 /* dimmed: the first key only wakes Home */
                 if (dim_f > 0.3f) { dirty = 1; break; }
                 if (k == SDLK_LEFT) move(-1, 0);
@@ -2872,7 +3207,7 @@ int main(int argc, char **argv) {
                 else if (k == SDLK_DOWN) move(0, 1);
                 else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) { if (!ev.key.repeat) ok_press(0, 0, 0); }
                 else if (is_back(&ev)) back_short();
-                else if (ev.key.keysym.scancode == SCAN_BLUE) { if (!ev.key.repeat) blue_press(); }
+                else if (ev.key.keysym.scancode == SCAN_BLUE) {}
                 else logf_("key sym=%d scan=%d", k, ev.key.keysym.scancode);
                 dirty = 1; break;
             }
@@ -2940,6 +3275,7 @@ int main(int argc, char **argv) {
         } else rendered_last = 0;
     }
     logf_("exit");
+    if (as_home) remove(STARTS_PATH);
     SDL_GL_DeleteContext(gl); SDL_DestroyWindow(win); SDL_Quit();
     return 0;
 }

@@ -17,6 +17,15 @@ E=/tmp/homenative-checkpoint
 [ -f /var/lib/homenative/disabled ] && exit 0
 [ -x "$NH" ] || exit 0
 
+ours=$(md5sum < "$NH")
+log() { echo "$(cut -d" " -f1 /proc/uptime) $*" >> /tmp/homenative-hook.log; }
+# This build kept crashing and stepped aside (see "safety net" in src/home.c): LG's Home stays,
+# until a different build is installed.
+if [ "$(cat /var/lib/homenative/failed 2>/dev/null)" = "$ours" ]; then
+  log "this build failed: leaving LG's Home"
+  exit 0
+fi
+
 grep -q " $H " /proc/mounts || mount --bind "$NH" "$H" || exit 0
 mkdir -p $E
 if ! grep " $CP " /proc/mounts | tail -1 | grep -q "^tmpfs .* ro,"; then
@@ -27,17 +36,18 @@ fi
 # hooks. Swap it for ours right away. It is brought to the front only if Home was there, so live
 # TV or HDMI is never interrupted; otherwise ours is preloaded hidden (SAM would only start Home
 # itself at ~70 s). A second look a little later catches anything that brought LG's back.
-ours=$(md5sum < "$NH")
-log() { echo "$(cut -d" " -f1 /proc/uptime) $*" >> /tmp/homenative-hook.log; }
 log "mounted"
+foreground() {
+  luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo '{}' 2>/dev/null |
+    sed -n 's/.*"appId": *"\([^"]*\)".*/\1/p'
+}
 swap_if_lg() {
   lg=""
   for P in $(pidof com.webos.app.home); do
     [ "$(md5sum < /proc/$P/exe 2>/dev/null)" = "$ours" ] || lg="$lg $P"
   done
   [ -n "$lg" ] || return 0
-  fg=$(luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo '{}' 2>/dev/null |
-    sed -n 's/.*"appId": *"\([^"]*\)".*/\1/p')
+  fg=$(foreground)
   log "killing LG Home$lg (foreground: $fg)"
   kill -9 $lg
   sleep 1
@@ -61,4 +71,28 @@ preload() {
   swap_if_lg
   preload
 ) &
+
+# SAM doesn't restart a Home that dies behind another app or in standby, and waking the TV doesn't
+# either, so Home stays gone until someone presses the Home key and waits for a cold start. Two
+# looks a little apart, so this doesn't race SAM, and it ends once the mounts are lifted. A preload
+# takes the front from the app on screen, so that app gets it back.
+W=/tmp/homenative-watch
+kill "$(cat $W 2>/dev/null)" 2>/dev/null
+(
+  gone=0
+  while sleep 30 && grep -q " $H " /proc/mounts; do
+    if [ -n "$(pidof com.webos.app.home)" ]; then gone=0; continue; fi
+    gone=$((gone + 1))
+    [ $gone -lt 2 ] && continue
+    gone=0
+    fg=$(foreground)
+    preload
+    sleep 3
+    if [ -n "$fg" ] && [ "$fg" != "com.webos.app.home" ] && [ "$(foreground)" = "com.webos.app.home" ]; then
+      log "giving the front back to $fg"
+      luna-send -n 1 luna://com.webos.applicationManager/launch "{\"id\":\"$fg\"}" >/dev/null 2>&1
+    fi
+  done
+) </dev/null >/dev/null 2>&1 &
+echo $! > $W
 exit 0

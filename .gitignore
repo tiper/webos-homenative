@@ -4,6 +4,7 @@
 !/.gitignore
 !/README.md
 !/TESTING.md
+!/CHANGELOG.md
 !/Makefile
 !/mkipk.py
 !/src/
@@ -11,6 +12,7 @@
 !/pkg/
 !/hook/
 !/scripts/
+!/tests/
 !/art/
 !/docs/
 !/LICENSE

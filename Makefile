@@ -4,9 +4,9 @@
 WEBOS_SDK ?= $(HOME)/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot
 SYSROOT    = $(WEBOS_SDK)/arm-webos-linux-gnueabi/sysroot
 CC         = $(WEBOS_SDK)/bin/arm-webos-linux-gnueabi-gcc
-CFLAGS     = --sysroot=$(SYSROOT) -O2 -Wall -Wextra -std=gnu11 -Ivendor \
+CFLAGS     = --sysroot=$(SYSROOT) -O2 -funwind-tables -Wall -Wextra -std=gnu11 -Ivendor \
              -I$(SYSROOT)/usr/include/glib-2.0 -I$(SYSROOT)/usr/lib/glib-2.0/include -I$(SYSROOT)/usr/include/freetype2
-LIBS       = -lSDL2 -lSDL2_image -lSDL2_ttf -lGLESv2 -lluna-service2 -lglib-2.0 -lfreetype -ldl -lm
+LIBS       = -lSDL2 -lSDL2_image -lSDL2_ttf -lGLESv2 -lluna-service2 -lglib-2.0 -lfreetype -ldl -lm -lpthread
 APPID      = io.github.tiper.homenative
 
 pkg/homenative: src/home.c vendor/cJSON.c vendor/cJSON.h

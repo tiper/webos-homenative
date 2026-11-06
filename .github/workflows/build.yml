@@ -19,6 +19,14 @@ env:
   NDK_FILE: arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz
 
 jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev
+      - name: The monkey test, under ASan and UBSan
+        run: tests/host/run.sh 8 8000
+
   build:
     runs-on: ubuntu-24.04
     steps:
