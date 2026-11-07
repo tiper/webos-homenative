@@ -49,11 +49,15 @@ if grep -q " $H " /proc/mounts; then
   if [ -z "$(pidof com.webos.app.home)" ]; then
     if [ "$fg" = "com.webos.app.home" ]; then p='{"id":"com.webos.app.home"}'; else p='{"id":"com.webos.app.home","preload":"full"}'; fi
     luna-send -n 1 luna://com.webos.applicationManager/launch "$p" >/dev/null 2>&1
-    sleep 3
-    now=$(luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo '{}' 2>/dev/null |
-      sed -n 's/.*"appId": *"\([^"]*\)".*/\1/p')
-    if [ -n "$fg" ] && [ "$fg" != "com.webos.app.home" ] && [ "$now" = "com.webos.app.home" ]; then
-      luna-send -n 1 luna://com.webos.applicationManager/launch "{\"id\":\"$fg\"}" >/dev/null 2>&1
+    if [ -n "$fg" ] && [ "$fg" != "com.webos.app.home" ]; then
+      for i in $(seq 1 60); do
+        now=$(luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo '{}' 2>/dev/null |
+          sed -n 's/.*"appId": *"\([^"]*\)".*/\1/p')
+        if [ "$now" = "com.webos.app.home" ]; then
+          luna-send -n 1 luna://com.webos.applicationManager/launch "{\"id\":\"$fg\"}" >/dev/null 2>&1
+          break
+        fi
+      done
     fi
   fi
   # the hook, again: its watch on Home starts now rather than at the next boot
