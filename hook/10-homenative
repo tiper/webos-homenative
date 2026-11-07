@@ -88,11 +88,13 @@ kill "$(cat $W 2>/dev/null)" 2>/dev/null
     fg=$(foreground)
     preload
     [ -n "$fg" ] && [ "$fg" != "com.webos.app.home" ] || continue
-    i=0
-    while [ "$(foreground)" != "com.webos.app.home" ] && [ $i -lt 60 ]; do i=$((i + 1)); done
-    [ $i -lt 60 ] || continue
-    log "giving the front back to $fg"
-    luna-send -n 1 luna://com.webos.applicationManager/launch "{\"id\":\"$fg\"}" >/dev/null 2>&1
+    end=$(($(date +%s) + 4))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      [ "$(foreground)" = "com.webos.app.home" ] || continue
+      log "giving the front back to $fg"
+      luna-send -n 1 luna://com.webos.applicationManager/launch "{\"id\":\"$fg\"}" >/dev/null 2>&1
+      break
+    done
   done
 ) </dev/null >/dev/null 2>&1 &
 echo $! > $W

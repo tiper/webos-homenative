@@ -50,7 +50,8 @@ if grep -q " $H " /proc/mounts; then
     if [ "$fg" = "com.webos.app.home" ]; then p='{"id":"com.webos.app.home"}'; else p='{"id":"com.webos.app.home","preload":"full"}'; fi
     luna-send -n 1 luna://com.webos.applicationManager/launch "$p" >/dev/null 2>&1
     if [ -n "$fg" ] && [ "$fg" != "com.webos.app.home" ]; then
-      for i in $(seq 1 60); do
+      end=$(($(date +%s) + 4))
+      while [ "$(date +%s)" -lt "$end" ]; do
         now=$(luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo '{}' 2>/dev/null |
           sed -n 's/.*"appId": *"\([^"]*\)".*/\1/p')
         if [ "$now" = "com.webos.app.home" ]; then
