@@ -39,6 +39,8 @@ Polish
 - A moved tile no longer snaps back for a moment.
 - Focus stays sensible when the row under it disappears.
 - The clock follows a daylight-saving change while Home stays on screen.
+- A new install goes after the last shown app, not behind the hidden ones, so it stays put when
+  edit mode shows them.
 
 Install
 - `install.sh` upgrades in place, with no reboot, and leaves the app on screen in front.

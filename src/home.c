@@ -1300,6 +1300,7 @@ static void hidden_set(const char *id, int on) {
 }
 static int edit_mode_moving(void);
 static void apps_fix_sel(void);
+static void on_moved(cJSON *root, const char *raw);
 enum { ED_OFF, ED_BROWSE, ED_MOVE, ED_TRASH, ED_CONFIRM, ED_HIDE }; /* ED_HIDE: the eye over a tile, ours */
 static int edit_mode;
 static int lp_stale; /* a launch point update arrived while a tile was carried */
@@ -1343,6 +1344,24 @@ static void on_launchpoints(cJSON *root, const char *raw) {
     }
     logf_("apps: %d launch points", nw.n);
     Row *ar = &rows[ROW_APPS];
+    /* SAM puts a new install last, behind the hidden apps: shown in edit mode, they would push it
+     * to the far end under the focus. It goes right after the last shown app instead, here and
+     * in SAM (not on the first fill: there nothing is known to be new) */
+    for (int j = 0; ar->n && j < nw.n; j++) {
+        int k = j - 1, known = 0;
+        while (k >= 0 && nw.items[k].hidden) k--;
+        if (k == j - 1 || nw.items[j].hidden) continue;
+        for (int i = 0; i < ar->n && !known; i++) known = !ar->items[i].dying && !strcmp(ar->items[i].id, nw.items[j].id);
+        if (known) continue;
+        Item it = nw.items[j];
+        memmove(&nw.items[k + 2], &nw.items[k + 1], sizeof(Item) * (size_t)(j - k - 1));
+        nw.items[k + 1] = it;
+        int pos = k + 1; /* SAM's position counts our own launch point, which the row leaves out */
+        if (own_index >= 0 && pos >= own_index) pos++;
+        char p[300]; snprintf(p, sizeof p, "{\"launchPointId\":\"%s\",\"position\":%d}", it.lpid, pos);
+        logf_("new app after the shown ones: %s", p);
+        call("luna://com.webos.applicationManager/moveLaunchPoint", p, on_moved);
+    }
     char was[200] = ""; if (ar->n) scpy(was, sizeof was, ar->items[ar->sel].id);
     row_merge(ar, &nw);
     apps_fix_sel();
