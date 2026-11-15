@@ -922,6 +922,7 @@ static void row_merge(Row *r, Row *nw) {
 }
 
 static int row_live(const Row *r) { int c = 0; for (int i = 0; i < r->n; i++) c += !r->items[i].dying; return c; }
+static int row_has(const Row *r, const char *id) { for (int i = 0; i < r->n; i++) if (!r->items[i].dying && !strcmp(r->items[i].id, id)) return 1; return 0; }
 
 static const char *jstr(cJSON *o, const char *k) { cJSON *v = cJSON_GetObjectItemCaseSensitive(o, k); return cJSON_IsString(v) ? v->valuestring : ""; }
 
@@ -1300,7 +1301,14 @@ static void hidden_set(const char *id, int on) {
 }
 static int edit_mode_moving(void);
 static void apps_fix_sel(void);
-static void on_moved(cJSON *root, const char *raw);
+static void on_moved(cJSON *root, const char *raw) { (void)root; logf_("moveLaunchPoint: %.200s", raw ? raw : ""); }
+/* pos: among the row's live items. SAM's position counts our own launch point, which the row leaves out */
+static void sam_move(const char *why, const char *lpid, int pos) {
+    if (own_index >= 0 && pos >= own_index) pos++;
+    char p[300]; snprintf(p, sizeof p, "{\"launchPointId\":\"%s\",\"position\":%d}", lpid, pos);
+    logf_("%s %s", why, p);
+    call("luna://com.webos.applicationManager/moveLaunchPoint", p, on_moved);
+}
 enum { ED_OFF, ED_BROWSE, ED_MOVE, ED_TRASH, ED_CONFIRM, ED_HIDE }; /* ED_HIDE: the eye over a tile, ours */
 static int edit_mode;
 static int lp_stale; /* a launch point update arrived while a tile was carried */
@@ -1347,20 +1355,15 @@ static void on_launchpoints(cJSON *root, const char *raw) {
     /* SAM puts a new install last, behind the hidden apps: shown in edit mode, they would push it
      * to the far end under the focus. It goes right after the last shown app instead, here and
      * in SAM (not on the first fill: there nothing is known to be new) */
-    for (int j = 0; ar->n && j < nw.n; j++) {
-        int k = j - 1, known = 0;
-        while (k >= 0 && nw.items[k].hidden) k--;
-        if (k == j - 1 || nw.items[j].hidden) continue;
-        for (int i = 0; i < ar->n && !known; i++) known = !ar->items[i].dying && !strcmp(ar->items[i].id, nw.items[j].id);
-        if (known) continue;
-        Item it = nw.items[j];
-        memmove(&nw.items[k + 2], &nw.items[k + 1], sizeof(Item) * (size_t)(j - k - 1));
-        nw.items[k + 1] = it;
-        int pos = k + 1; /* SAM's position counts our own launch point, which the row leaves out */
-        if (own_index >= 0 && pos >= own_index) pos++;
-        char p[300]; snprintf(p, sizeof p, "{\"launchPointId\":\"%s\",\"position\":%d}", it.lpid, pos);
-        logf_("new app after the shown ones: %s", p);
-        call("luna://com.webos.applicationManager/moveLaunchPoint", p, on_moved);
+    for (int j = 0, last = -1; ar->n && j < nw.n; j++) { /* last: the last shown app so far */
+        if (nw.items[j].hidden) continue;
+        if (last < j - 1 && !row_has(ar, nw.items[j].id)) {
+            Item it = nw.items[j];
+            memmove(&nw.items[last + 2], &nw.items[last + 1], sizeof(Item) * (size_t)(j - last - 1));
+            nw.items[last + 1] = it;
+            sam_move("new app after the shown ones:", it.lpid, last + 1);
+            last++;
+        } else last = j;
     }
     char was[200] = ""; if (ar->n) scpy(was, sizeof was, ar->items[ar->sel].id);
     row_merge(ar, &nw);
@@ -2620,8 +2623,6 @@ static void enter_dpad_mode(void) {
     motion_since_dpad = 0;
 }
 
-static void on_moved(cJSON *root, const char *raw) { (void)root; logf_("moveLaunchPoint: %.200s", raw ? raw : ""); }
-
 static int move_from = -1; /* where the carried tile was picked up */
 
 /* put the carried tile down: tell SAM if it moved */
@@ -2631,14 +2632,9 @@ static void edit_drop(void) {
     edit_mode = ED_BROWSE;
     Row *r = &rows[ROW_APPS];
     if (r->n && r->sel != move_from) {
-    Item *it = &r->items[r->sel];
-    /* SAM's position counts our own launch point, which the row leaves out */
     int pos = 0;
     for (int i = 0; i < r->sel; i++) pos += !r->items[i].dying;
-    if (own_index >= 0 && pos >= own_index) pos++;
-    char p[300]; snprintf(p, sizeof p, "{\"launchPointId\":\"%s\",\"position\":%d}", it->lpid, pos);
-    logf_("move %s", p);
-    call("luna://com.webos.applicationManager/moveLaunchPoint", p, on_moved);
+    sam_move("move", r->items[r->sel].lpid, pos);
     }
     /* after the move, or the reply would carry the old order */
     if (lp_stale) { lp_stale = 0; call("luna://com.webos.applicationManager/listLaunchPoints", "{}", on_launchpoints); }
